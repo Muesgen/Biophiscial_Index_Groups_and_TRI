@@ -118,3 +118,25 @@ extract_TRW <- function(xls_folder, points_path, crop = FALSE) {
   
   return(final_data)
 }
+
+ TRW_df <- extract_TRW(
+   xls_folder  = "data/dendro_data/MW3_Daten/Dendro-Data/d-XLS",
+   points_path = "data/vector_data/trees_all_plots.gpkg"
+ )
+ 
+ chronologies_by_plot <- TRW_df |>
+   group_by(plot) |>
+   group_modify(~{
+     wide  <- pivot_wider(.x, Year, names_from = tree_id, values_from = ring_width)
+     rwi   <- detrend(as.rwl(wide[,-1]), method = "Spline", nyrs = 13, f = 0.6)         # detrend
+     chron <- chron(as.data.frame(rwi), prefix = paste0("CH_", unique(.x$plot)))
+     chron |>
+       tibble::rownames_to_column("year") |>
+       mutate(year = as.numeric(year) + 1649,     # calendar offset
+              plot = unique(.x$plot))
+   }) |>
+   ungroup() |>
+   rename(TRI = starts_with("std"))               # TRI column
+ chronologies_by_plot <- na.omit(chronologies_by_plot)
+ 
+write.csv(chronologies_by_plot, "data/analysis_ready_data/TRI_chronologies.csv", row.names = FALSE)

@@ -77,6 +77,8 @@ plot_clim <- extract_plot_climate(
   plot_col   = "plot"
 )
 
+plot_clim <- read.table("data/analysis_ready_data/climate_df.csv", header = TRUE, sep  =",")
+
 clim_dt <- as.data.table(plot_clim)
 clim_dt[, date := as.IDate(sprintf("%04d-%02d-15", year, month))]
 setorder(clim_dt, plot, date)

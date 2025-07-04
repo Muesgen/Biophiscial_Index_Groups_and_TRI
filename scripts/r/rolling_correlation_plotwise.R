@@ -30,6 +30,7 @@ library(readxl)
 library(tibble)
 library(RColorBrewer) 
 library(data.table)
+library(fuzzyjoin)
 
 # custom extractors (paths relative to your repo)
 source("scripts/r/functions/extract_TRW.R")          # tree-ring widths
@@ -41,76 +42,90 @@ source("scripts/r/functions/extract_predictors.R")
 # 1. SATELLITE DATA  – daily VIs per plot
 # ─────────────────────────────────────────────────────────────────────────────
 ## 1A  raw reflectance pixels --------------------------------------------------
-SDC_df <- extract_SDC_buffered(
-  folder_paths = c("data/satellite_data/SDC/lindenberg_eifel_koenigsforst",
-                   "data/satellite_data/SDC/kellerwald_lahntal"),
-  points_path  = "data/vector_data/trees_all_plots.gpkg",
-  buffer_m     = 1,
-  method = "original",
-)
+SDC_df <- read.csv("data/analysis_ready_data/SDC_extracted.csv")
 names(SDC_df)[1] <- "plot"                          # first col → plot ID
-
-#spi_summary <- extract_spi_by_plot(
-#  points_path = "data/vector_data/trees_all_plots.gpkg",
-#  spi_path    = "data/climate/SPI/SPI_1991_2024_12_month.tif",
-#  buffer = 10,
-#  years = 2000:2022,
-#  month_of_interest = 12
-#)
 
 ## 1B  add calendar fields -----------------------------------------------------
 SDC_df <- SDC_df |>
   mutate(year = year(date),           # calendar year
-         doy  = yday(date))           # day-of-year (1–365/366)
+         doy  = yday(date),
+         date = as.Date(date))          # ② same for the SDC table)           # day-of-year (1–365/366)
+
+par_tbl <- read.csv("data/analysis_ready_data/daily_PAR_mean_by_plot.csv") |>
+  mutate(date = as.Date(date))          # ① guarantee Date class
+
+
+setDT(SDC_df)[ , date := as.IDate(date)]     # IDate = fast Date
+setDT(par_tbl)[, date := as.IDate(date)]
+
+par_tbl[ , par_mean :=
+           frollmean(par_mean,             # data.table’s fast roll
+                     n = 16,               # 8-day window
+                     align = "right",
+                     na.rm = TRUE),
+         by = plot]
+
+setkey(par_tbl, plot, date)                  # key on both cols
+SDC_daily <- par_tbl[SDC_df, roll = "nearest"]   # keeps SDC order
+
 
 ## 1C  daily mean vegetation indices ------------------------------------------
-# if multiple Landsat observations fall on the same day, we average them
-SDC_daily <- SDC_df |>
-  group_by(plot, date) |>
-  summarise(
-    NDVI   = mean((nir-red)/(nir+red), na.rm = TRUE),
-    EVI    = mean(2.5*(nir-red)/(nir+6*red-7.5*blue+1), na.rm = TRUE),
-    NDMI   = mean((nir-swir1)/(nir+swir1), na.rm = TRUE),
-    NDWI   = mean((green+nir)/(green-nir) * -nir, na.rm = TRUE),
-    NBR    = mean((nir-swir2)/(nir+swir2), na.rm = TRUE),
-    NBR2   = mean((swir1-swir2)/(swir1+swir2), na.rm = TRUE),
-    OSAVI  = mean((nir-red)/(nir+red+0.16), na.rm = TRUE),
-    NIRv   = mean(((nir-red)/(nir+red))*nir, na.rm = TRUE),
-    NIRv   = mean(((nir-red)/(nir+red))*nir + 0.08, na.rm = TRUE),
-    VMI    = mean((nir-swir1)*(nir-swir2)/(nir+swir1+swir2), na.rm = TRUE),
-    NMDI   = mean((nir-(swir1-swir2))/(nir+(swir1-swir2)), na.rm = TRUE),
-    MSI    = mean(nir/swir1, na.rm = TRUE),
-    MSII   = mean(nir/swir2, na.rm = TRUE),
-    MSAVI2 = mean((nir*swir1-swir2*red)/(nir*swir1+swir2*red+1e-3), na.rm = TRUE),
-    VMSI   = mean((nir+swir1-swir2-red)/(nir+swir1+swir2+red+1e-3), na.rm = TRUE),
-    EVDI   = mean((nir-red-swir2)/(nir+red+swir2), na.rm = TRUE),
-    TBMI   = mean((swir1-swir2-red)/(swir1+swir2+red), na.rm = TRUE),
-    year   = first(year),                       # keep calendar fields
-    doy    = first(doy),
-    .groups = "drop"
-  )
+# ── 1. σ per date (mean |NIR–Red| across *all* points that day) -----------
+sigma_tbl <- SDC_daily %>%
+  summarise(sigma = mean(abs(nir - red), na.rm = TRUE), .by = date)   # dplyr 1.1+
+
+
+# make sure every table uses Date (not IDate or POSIXct)
+SDC_daily  <- SDC_daily  %>% mutate(date = as.Date(date))
+sigma_tbl  <- sigma_tbl  %>% mutate(date = as.Date(date))
+
+# ── 2. compute indices for each row (no grouping needed) ------------------
+SDC_daily <- SDC_daily %>%
+  mutate(
+    NDVI    = (nir - red) / (nir + red),
+    GNDVI   = (nir - green) / (nir + red),
+    EVI     = 2.5 * (nir - red) / (nir + 6 * red - 7.5 * blue + 1),
+    GRVI    = (green - red) / (green + red),
+    #OSAVI   = (nir - red) / (nir + red + 0.16),
+    NIRv    = NDVI * nir,
+    NIRvPar = NIRv * par_mean,
+    kNDVI   = (1 - exp(-(nir - red)^2 / (2 * 0.2^2))) / (1 + exp(-(nir - red)^2 / (2 * 0.2^2))),
+    #VMI     = (nir - swir1) * (nir - swir2) / (nir + swir1 + swir2),
+    SIPI    = ((nir - blue) / (nir - red)) * -1,
+    NMDI    = (nir - (swir1 -swir2))/(nir+(swir1+swir2)),
+    GVMI    = ((nir + 0.10) - (swir2 + 0.02)) /((nir + 0.10) + (swir2 + 0.02)),
+    CIG     = (nir / green) - 1,
+    #MSI     = nir / swir1,
+    NDWI    = (nir - swir1) / (nir + swir1),
+    year    = year(date),
+    doy     = yday(date)
+  ) %>%
+  select( -par_mean, - blue, -green, -nir, -red, -swir1, -swir2)          # drop helper column if you like
+
+
+## ------------------------------------------------------------------
+## 1  Load the daily PAR table you exported earlier
+## ------------------------------------------------------------------
+
+winsor <- function(x, k = 3) {
+  med  <- median(x, na.rm = TRUE)
+  mad_ <- mad(x, na.rm = TRUE)
+  upper <- med + k * mad_
+  lower <- med - k * mad_
+  pmin(pmax(x, lower), upper)
+}
+index_cols <- names(SDC_daily)[seq(6,17,1)]
+
+SDC_daily <- SDC_daily %>%
+  group_by(plot) %>%
+  mutate(across(all_of(index_cols), winsor)) %>%
+  ungroup()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. TREE-RING CHRONOLOGIES  – detrended TRI per plot
 # ─────────────────────────────────────────────────────────────────────────────
-TRW_df <- extract_TRW(
-  xls_folder  = "data/dendro_data/MW3_Daten/Dendro-Data/d-XLS",
-  points_path = "data/vector_data/trees_all_plots.gpkg"
-)
-
-chronologies_by_plot <- TRW_df |>
-  group_by(plot) |>
-  group_modify(~{
-    wide  <- pivot_wider(.x, Year, names_from = tree_id, values_from = ring_width)
-    rwi   <- detrend(as.rwl(wide[,-1]), method = "Spline", nyrs = 13, f = 0.6)         # detrend
-    chron <- chron(as.data.frame(rwi), prefix = paste0("CH_", unique(.x$plot)))
-    chron |>
-      tibble::rownames_to_column("year") |>
-      mutate(year = as.numeric(year) + 1649,     # calendar offset
-             plot = unique(.x$plot))
-  }) |>
-  ungroup() |>
-  rename(TRI = starts_with("std"))               # TRI column
+chronologies_by_plot <- read.csv("data/analysis_ready_data/TRI_chronologies.csv") %>%
+  dplyr::filter(year < 2023)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. ROLLING-SUM VIs  (1–24-day windows, daily resolution)
@@ -120,7 +135,7 @@ accum_windows <- 1:91                          # candidate window lengths
 ## 3A  long table: one VI per row ------------------------------------------------
 SDC_long <- SDC_daily |>
   pivot_longer(
-    -c(plot, date, year, doy),                  # keep date + calendar cols
+    -c(plot, date, year, doy, area),                  # keep date + calendar cols
     names_to  = "VI", values_to = "value"
   )
 
@@ -157,7 +172,6 @@ cum_TRI_filtered <- SDC_cum_long |>
                 "SF09","SF12", "SF14","SF17", "SF18","SF19","SF20") ~ "deciduous",
     TRUE                                                  ~ NA_character_
   ))
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. CORRELATION HEAT-TABLE  &  best (window, DOY)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -193,10 +207,9 @@ heat_prev <- cum_TRI_filtered %>%
   # now correlate the lagged cum_prev vs. TRI_current
   group_by(plot, forest_type, VI, window, doy) %>%
   summarise(
-    correlation = if (n() > 1) 
-      cor(cum_prev, TRI_current, use = "pairwise.complete.obs")
-    else 
-      NA_real_,
+    correlation = if (sum(!is.na(cum_prev) & !is.na(TRI_current)) > 1)
+      cor(cum_prev, TRI_current, use = "complete.obs")
+    else NA_real_,
     .groups = "drop"
   ) %>%
   mutate(lag = 1)
@@ -204,11 +217,10 @@ heat_prev <- cum_TRI_filtered %>%
 # 3. Bind them and plot as before:
 heat_all <- bind_rows(heat_curr, heat_prev)
 
-saveRDS(heatmap_df, "corr_table_vi_tri.rds")
+saveRDS(heat_all, "corr_table_vi_tri.rds")
 
-best_combo <- heatmap_df |>
-  dplyr::filter(!is.na(correlation),          # keep non-missing
-         correlation > 0) |>           # keep only positive r
+best_combo <- heat_all |>
+  dplyr::filter(!is.na(correlation)) |>           # keep only positive r
   group_by(plot, VI) |>
   slice_max(correlation,               # largest positive r
             n = 1, with_ties = FALSE) |>
@@ -335,40 +347,15 @@ walk(unique(plot_tbl$plot), \(pl){
 # 8. SUMMARY TABLE  (mean |r|, window, DOY per VI × forest type)
 # ─────────────────────────────────────────────────────────────────────────────
 summary_tbl <- best_combo |>
-  group_by(forest_type, VI) |>
+  group_by(VI) |>
   summarise(
     plots_used  = n(),
     mean_abs_r  = mean(abs(correlation)),
     mean_window = mean(window), sd_window = sd(window),
     mean_doy    = mean(doy),    sd_doy    = sd(doy),
     .groups     = "drop") |>
-  arrange(forest_type, desc(mean_abs_r))
+  arrange(desc(mean_abs_r))
 print(summary_tbl)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 9. DISTRIBUTION PLOTS  (window length & DOY)
-# ─────────────────────────────────────────────────────────────────────────────
-ggplot(best_combo, aes(window, fill = forest_type)) +
-  geom_histogram(binwidth = 1, colour = "white", alpha = .7,
-                 position = "identity") +
-  facet_wrap(~VI, ncol = 4, scales = "free_y") +
-  scale_fill_manual(values = c(coniferous="forestgreen",deciduous="tan4")) +
-  labs(title = "Best window length by VI & forest type",
-       x = "window length (days)", y = "count", fill = NULL) +
-  theme_minimal()
-
-month_breaks <- cumsum(c(1,31,28,31,30,31,30,31,31,30,31,30,31))
-month_mids   <- month_breaks[-13] + diff(month_breaks)/2
-
-ggplot(best_combo, aes(doy, fill = forest_type)) +
-  geom_histogram(breaks = month_breaks, colour = "white",
-                 alpha = .7, position = "identity", closed = "left") +
-  facet_wrap(~VI, ncol = 4, scales = "free_y") +
-  scale_x_continuous(breaks = month_mids, labels = month.abb) +
-  scale_fill_manual(values = c(coniferous="forestgreen",deciduous="tan4")) +
-  labs(title = "Start-DOY of best window by VI & forest type",
-       x = "month", y = "count", fill = NULL) +
-  theme_minimal()
 
 ## --- 10B  output folder ------------------------------------------------------
 dir.create("figures/VI_TRI_heatmaps_by_plot", showWarnings = FALSE)
@@ -427,198 +414,8 @@ for (pl in unique(heatmap_df$plot)) {
   )
 }
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Principal Component Analysis (PCA) of NIRv Correlation Patterns (PC1–PC6)
-# ─────────────────────────────────────────────────────────────────────────────
-
-library(dplyr)
-library(tidyr)
-library(purrr)
-library(tibble)
-library(ggplot2)      # only needed for the optional scree & dendrogram
-library(patchwork)    # idem
-library(stats)        # princomp(), hclust(), dist()
-
-# ------------------------------------------------------------------------------
-# 1.  Keep rows that satisfy the temporal window you defined
-#     (    ≥ 1 Mar   &   ≤ 31 Oct   )  for *all* VIs
-# ------------------------------------------------------------------------------
-valid_df <- heatmap_df %>% 
-  dplyr::filter(!is.na(correlation)) %>% 
-  mutate(start_doy = doy - window + 1) %>% 
-  dplyr::filter(start_doy >= 60,        # ≥ 1 Mar
-         doy       <= 304) %>%   # ≤ 31 Oct
-  select(-start_doy)
-
-# ------------------------------------------------------------------------------
-# 2.  Build one huge “feature” for every combination VI × window × DOY,
-#     then pivot wider so that each plot becomes a row and every feature a column
-# ------------------------------------------------------------------------------
-wide_df <- valid_df %>% 
-  mutate(feature = paste(VI, sprintf("w%02d", window), sprintf("d%03d", doy),
-                         sep = "_")) %>%           # e.g. NDVI_w03_d183
-  select(plot, feature, correlation) %>% 
-  pivot_wider(names_from = feature, values_from = correlation)
-
-# ------------------------------------------------------------------------------
-# 3.  Prepare a numeric matrix (plots × features)  -----------------------------
-#     and compute the correlation matrix R across plots
-# ------------------------------------------------------------------------------
-X <- wide_df %>% select(-plot) %>% as.matrix()
-rownames(X) <- wide_df$plot         # <-- 🔑 keep the plot IDs!
-
-
-# Replace completely empty columns (all NAs) with 0 so cor() won’t choke
-if (any(colSums(!is.na(X)) == 0)) {
-  X[, which(colSums(!is.na(X)) == 0)] <- 0
-}
-
-R_all <- cor(t(X), use = "pairwise.complete.obs")    # plots × plots
-
-# ------------------------------------------------------------------------------
-# 4.  S-mode PCA on R_all, exactly the way you did for NIRv --------------------
-# ------------------------------------------------------------------------------
-pc_all <- princomp(covmat = R_all)
-
-# Optional: variance explained
-screeplot(pc_all, type = "lines", main = "S-mode PCA – all VIs")
-
-# ------------------------------------------------------------------------------
-# 5.  Classification = component with the strongest loading (PC1…PC6) ----------
-# ------------------------------------------------------------------------------
-load_mat <- unclass(loadings(pc_all))
-load_df  <- as.data.frame(load_mat) %>% 
-  rownames_to_column("plot")
-
-classification <- load_df %>% 
-  pivot_longer(cols      = starts_with("Comp."),
-               names_to  = "PC",
-               values_to = "loading") %>% 
-  dplyr::filter(PC %in% paste0("Comp.", 1:3)) %>% 
-  group_by(plot) %>% 
-  slice_max(abs(loading), n = 1) %>% 
-  ungroup()
-
-print(classification)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Reconstruct and Visualize the Correlation Patterns for PC1–PC6
-# ─────────────────────────────────────────────────────────────────────────────
-
-# 10. Prepare loadings table restricted to PC1–PC6
-pc_loadings <- load_df %>%
-  select(plot, starts_with("Comp.")) %>%
-  pivot_longer(
-    cols = starts_with("Comp."),
-    names_to = "PC",
-    values_to = "loading"
-  ) %>%
-  dplyr::filter(PC %in% paste0("Comp.", 1:3))
-
-# 11. Prepare list to store reconstructed maps for each PC
-pc_maps_list <- list()
-
-# 12. Loop over PC1 to PC6 to build normalized weighted correlation surfaces
-for (pc_id in paste0("Comp.", 1:3)) {
-  
-  # Get loadings for the current PC
-  loadings_this_pc <- pc_loadings %>%
-    dplyr::filter(PC == pc_id) %>%
-    select(plot, loading)
-  
-  # Calculate normalization factor to keep values bounded
-  normalization_factor <- sum(abs(loadings_this_pc$loading), na.rm = TRUE)
-  
-  # Reconstruct weighted correlation surface for this PC
-  pc_surface <- valid_df %>%
-    inner_join(loadings_this_pc, by = "plot") %>%
-    mutate(weighted_corr = correlation * loading) %>%
-    group_by(window, doy) %>%
-    summarise(
-      correlation_estimate = sum(weighted_corr, na.rm = TRUE) / normalization_factor,
-      .groups = "drop"
-    ) %>%
-    mutate(PC = pc_id)
-  
-  # Store the result
-  pc_maps_list[[pc_id]] <- pc_surface
-}
-
-# 13. Combine all PC surfaces into one data frame
-pc_maps <- bind_rows(pc_maps_list)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Plot Reconstructed PC1–PC6 Correlation Patterns as Contour Maps
-# ─────────────────────────────────────────────────────────────────────────────
-ggplot(pc_maps, aes(x = doy, y = window, z = correlation_estimate)) +
-  geom_contour_filled(bins = 10) +
-  geom_contour(bins = 10, colour = "grey30", size = 0.2) +
-  facet_wrap(~PC, ncol = 2) +
-  scale_x_continuous(breaks = seq(0, 366, by = 30), name = "Day of Year") +
-  scale_y_continuous(name = "Cumulative Window Length (days)") +
-  labs(title = "Reconstructed Correlation Patterns for PC1–PC6") +
-  theme_minimal()
-
-overall_summary <- best_combo |>
-  group_by(VI) |>
-  summarise(
-    plots_used  = n(),
-    mean_abs_r  = mean(abs(correlation)), sd_abs_r = sd(abs(correlation)),
-    mean_window = mean(window), sd_window = sd(window),
-    mean_doy    = mean(doy),    sd_doy    = sd(doy),
-    .groups     = "drop") |>
-  arrange(desc(mean_abs_r))
-
-#####################################################
-
-pred_tbl <- extract_predictors(
-  points_path  = "data/vector_data/trees_all_plots.gpkg",
-  raster_path  = "data/satellite_data/predictors/predictors.tif",
-  buffer_width = 10
-)
-
-group_df_pca <- classification %>%              # already created above
-  transmute(
-    plot,
-    group = factor(PC,                        # Comp.1, Comp.2, …
-                   levels = paste0("Comp.", 1:6))  # keeps natural order
-  )
-
-# ──────────────────────────────────────────────────────────────
-# B.  Merge with the predictor table  ─────────────────────────
-# ──────────────────────────────────────────────────────────────
-pred_tbl_grp <- pred_tbl %>%                  # your original table
-  left_join(group_df_pca, by = "plot") %>%    # add the PCA group
-  drop_na(group)                              # drop plots w/o a group
-
-# ──────────────────────────────────────────────────────────────
-# C.  Long form & facetted box-plots  ─────────────────────────
-# ──────────────────────────────────────────────────────────────
-pred_long <- pred_tbl_grp %>% 
-  pivot_longer(
-    cols      = c(slope, aspect, dem, ai),   # predictors to display
-    names_to  = "variable",
-    values_to = "value"
-  )
-
-ggplot(pred_long, aes(x = group, y = value, fill = group)) +
-  geom_boxplot(outlier.shape = 21, alpha = .6) +
-  facet_wrap(~ variable, scales = "free_y") +
-  scale_fill_brewer(palette = "Set2", guide = "none") +
-  labs(x = "PCA-based class",
-       y = "Value",
-       title = "Predictor distributions by PCA-derived group") +
-  theme_bw() +
-  theme(strip.text = element_text(face = "bold")) +
-  geom_point(position = position_jitter(width = .15), size = 1.2)
-
-
-
-
-
-
+vi_order <- c("NDVI", "EVI",  "kNDVI", "NIRv", "NIRvPar",
+              "NMDI", "NDWI", "GVMI", "SIPI", "GRVI", "CIG", "GNDVI")
 
 
 dir.create("figures/VI_TRI_heatmaps_by_plot", showWarnings = FALSE)
@@ -628,6 +425,7 @@ for (pl in unique(heat_all$plot)) {
   df <- heat_all %>%
     dplyr::filter(plot == pl, !is.na(correlation)) %>%
     mutate(
+      VI          = factor(VI, levels = vi_order),   #
       ext_doy      = if_else(lag == 1, doy, doy + 365),
       month_date   = as.Date(ext_doy - 1, origin = "2000-01-01"),
       window_month = window * 8 / 30.437
@@ -693,7 +491,7 @@ for (pl in unique(heat_all$plot)) {
       sprintf("%s_%s_VI_TRI_contour_%s.png",
               unique(df$species), unique(df$area), pl)),
     plot   = p,
-    width  = 16, height = 9, dpi = 300, bg = "white"
+    width  = 16, height = 8, dpi = 300, bg = "white"
   )
 }
 
@@ -773,3 +571,4 @@ for (sp in unique(heat_all$species)) {
     width  = 16, height = 9, dpi = 300, bg = "white"
   )
 }
+

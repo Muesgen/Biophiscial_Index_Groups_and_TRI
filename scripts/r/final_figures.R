@@ -1,7 +1,11 @@
 library(dplyr)
 library(ggplot2)
+library(readxl)
 
 heat_all <- readRDS("corr_table_vi_tri.rds")
+plot_meta <- read_xlsx("data/vector_data/plot_metadata.xlsx")
+heat_all <- dplyr::left_join(heat_all, plot_meta, by = "plot")
+
 head(heat_all)
 
 # ── 1. keep the 10 strongest positive r per plot/VI ───────────────────────
@@ -38,61 +42,154 @@ p1 <- ggplot(best_combo, aes(VI, correlation)) +
 
 ggsave("figures/final_figures/VI_top_10.png", p1, height = 4, width = 11, bg = "white")
 
-# Load the correlation table
-heat_all <- readRDS("corr_table_vi_tri.rds")
-plot_meta <- read_xlsx("data/vector_data/plot_metadata.xlsx")
-heat_all <- dplyr::left_join(heat_all, plot_meta, by = "plot")
+library(scales)   
 
-# Keep top 10 correlations per plot–VI combo
+# ── 1. species-level median r (one row per species × VI) ──────────────────────
+species_level <- best_combo %>%               
+  group_by(species, VI) %>% 
+  summarise(species_median = median(correlation), .groups = "drop")
+
+# ── 2. counts of plots per species ────────────────────────────────────────────
+species_counts <- best_combo %>% 
+  count(species, name = "n") %>%                 # raw plot count
+  mutate(
+    n = n/120,     
+  )
+
+# ── 3. named vector for legend labels ─────────────────────────────────────────
+species_labs <- setNames(
+  paste0(species_counts$species, " (n = ", species_counts$n, ")"),
+  species_counts$species
+)
+# e.g. "FASY" → "FASY (n = 9)"
+
+# ── 4. build the figure ───────────────────────────────────────────────────────
+p_species <- ggplot() +
+  # background boxplots
+  geom_boxplot(
+    data    = best_combo,
+    aes(x = VI, y = correlation),
+    outlier.shape = NA,
+    width   = .6,
+    colour  = "grey40",
+    fill    = "grey90"
+  ) +
+  # species-level median lines
+  geom_line(
+    data    = species_level,
+    aes(x = VI, y = species_median, group = species, colour = species),
+    linewidth = .7, alpha = .2
+  ) +
+  # species-level median points
+  geom_point(
+    data    = species_level,
+    aes(x = VI, y = species_median, colour = species),
+    size = 2
+  ) +
+  # overall median-r labels on box tops
+  geom_text(
+    data = med_tbl,
+    aes(VI, median_r, label = sprintf("%.2f", median_r)),
+    vjust = -0.6, size = 3
+  ) +
+  scale_colour_brewer(
+    palette = "Dark2",
+    name    = "Species",
+    labels  = species_labs          # ← counts appear here
+  ) +
+  labs(
+    title    = "Top-10 VI–TRI correlations (species medians)",
+    subtitle = "Lines connect each species’ median correlation across vegetation indices",
+    x        = "Vegetation index (ordered by overall median r)",
+    y        = "Pearson correlation (r)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title         = element_text(face = "bold"),
+    panel.grid.major.x = element_line(colour = "grey85"),
+    panel.grid.major.y = element_blank(),
+    legend.position    = "right"
+  )
+
+# ── 5. display & save ─────────────────────────────────────────────────────────
+print(p_species)
+
+ggsave(
+  filename = "figures/final_figures/VI_top10_species_medians.png",
+  plot     = p_species,
+  width    = 11,
+  height   = 5,
+  dpi      = 300,
+  bg       = "white"
+)
+
+
+
+library(kableExtra)
+library(scales)  # make sure it's loaded
+
+# ------------------------------------------------------------------
+# 1. Load data (unchanged)
+heat_all  <- readRDS("corr_table_vi_tri.rds")
+plot_meta <- readxl::read_xlsx("data/vector_data/plot_metadata.xlsx")
+heat_all  <- dplyr::left_join(heat_all, plot_meta, by = "plot")
+
+# ------------------------------------------------------------------
+# 2. Keep 10 strongest VI–TRI correlations per plot and get medians
 top10 <- heat_all %>%
   dplyr::filter(!is.na(correlation)) %>%
   group_by(plot, VI) %>%
-  slice_max(order_by = correlation, n = 10, with_ties = FALSE) %>%
+  slice_max(correlation, n = 10, with_ties = FALSE) %>%
   ungroup()
 
-# Compute median r per plot and VI
 medians <- top10 %>%
   group_by(plot, VI, species) %>%
   summarise(median_r = median(correlation), .groups = "drop")
 
-# Pivot to wide format (one row per plot, VIs as columns)
-vi_order <- c("NDVI", "EVI", "kNDVI", "NIRv", "NIRvPar", "NMDI",
-              "NDWI", "GVMI", "SIPI", "GRVI", "CIG", "GNDVI")
+# ------------------------------------------------------------------
+# 3. Re-order & pivot for the kable
+vi_order <- c("NDVI","EVI","kNDVI","NIRv","NIRvP","NMDI",
+              "NDWI","GVMI","SIPI","GRVI","CIG","GNDVI")
 
 table_data <- medians %>%
-  pivot_wider(names_from = VI, values_from = median_r) %>%
-  select(plot, species, all_of(vi_order))  # reorder columns
+  tidyr::pivot_wider(names_from = VI, values_from = median_r) %>%
+  dplyr::select(plot, species, dplyr::all_of(vi_order)) %>%
+  arrange(species, plot)
 
-# Color shading helper (green = best)
-rank_shade_row <- function(row) {
-  # rank within row (ignoring plot/species columns)
-  rank_vals <- rank(-as.numeric(row[-c(1, 2)]), ties.method = "first")
-  shade <- scales::rescale(rank_vals, to = c(10, 80))
-  sprintf("green!%0.f", shade)
+# ------------------------------------------------------------------
+# 4. Build a *ggplot default red* gradient for the cells
+gp_red <- "#F8766D"                                        # ggplot2 default red
+all_vi_values <- unlist(table_data[vi_order], use.names = FALSE)
+
+shade_fun <- scales::col_numeric(
+  palette = c("#FFFFFF", gp_red),                          # white → red
+  domain  = range(all_vi_values, na.rm = TRUE)
+)
+
+for (vi in vi_order) {
+  table_data[[vi]] <- mapply(function(val) {
+    bg_col <- shade_fun(val)
+    cell_spec(sprintf("%.2f", val),
+              format      = "latex",
+              background  = bg_col,
+              color       = "black")
+  }, table_data[[vi]])
 }
 
-# Create matrix of LaTeX-colored values
-colored_table <- table_data %>%
-  mutate(across(all_of(vi_order), ~ sprintf("%.2f", .x))) %>%
-  rowwise() %>%
-  mutate(
-    across(all_of(vi_order), 
-           ~ cell_spec(.x, format = "latex", 
-                       background = rank_shade_row(cur_data())[which(names(cur_data()) == cur_column())], 
-                       color = "black"))
-  ) %>%
-  ungroup()
-
-# Final LaTeX table
+# ------------------------------------------------------------------
+# 5. Produce the LaTeX table (no grey striping)
 kbl(
-  colored_table,
-  format = "latex",
-  booktabs = TRUE,
-  escape = FALSE,
-  caption = "Median of the 10 strongest VI–TRI correlations per plot; cells coloured by within-plot rank (green = best).",
-  col.names = c("plot", "species", vi_order)
+  table_data,
+  format    = "latex",
+  booktabs  = TRUE,
+  escape    = FALSE,
+  caption   = paste(
+    "Median of the ten strongest VI–TRI correlations per plot.",
+    "Cell shading — deeper", gp_red, "= stronger correlation."
+  ),
+  col.names = c("Plot", "Species", vi_order)
 ) %>%
-  kable_styling(latex_options = c("striped", "hold_position"))
+  kable_styling(latex_options = "hold_position")   # <- no "striped"
 
 # ── 4. print the medians for reference ────────────────────────────────────
 med_tbl
@@ -124,7 +221,7 @@ best_combo <- readRDS("corr_table_vi_tri.rds") %>%
   dplyr::filter(!is.na(correlation), lag == 0, VI %in% vi_keep) %>%
   group_by(plot, VI) %>% slice_max(correlation, n = 100) %>% ungroup() %>%
   mutate(
-    VI  = factor(VI, levels = c("NDVI","EVI","kNDVI","NIRv","NIRvPar",
+    VI  = factor(VI, levels = c("NDVI","EVI","kNDVI","NIRv","NIRvP",
                                 "NMDI","NDWI","GVMI","SIPI","GRVI","CIG", "GNDVI")),
     month = month.abb[month(as.Date(doy, origin = "2000-01-01"))],
     win_month = window * 8 / 30.437            # 8-day steps → calendar months
@@ -190,7 +287,7 @@ omit_plots <- c("SF04","SF08","PF03","SF06","SF10",
 unique(heat_all$plot)
 
 # custom VI order ----------------------------------------------------------
-vi_order <- c("NDVI","EVI","OSAVI","kNDVI","NIRv","NIRvPar",
+vi_order <- c("NDVI","EVI","OSAVI","kNDVI","NIRv","NIRvP",
               "NMDI","NDWI","GVMI","SIPI","GRVI","CIG")
 
 # -------------------------------------------------------------------------
@@ -312,7 +409,7 @@ right_lines <- function(dend) {
 
 # ───────────────────────── 3. DENDROGRAM 1  (plots × plots | kNDVI) ──────────
 kndvi_mat <- heat_all                                                  %>% 
-  dplyr::filter(tolower(VI) == "kndvi")                                       %>% 
+  dplyr::filter(tolower(VI) == "evi")                                       %>% 
   mutate(time_id = paste0("w", window, "_d", doy, "_lag", lag))        %>% 
   group_by(time_id, plot)                                              %>% 
   summarise(corr = mean(correlation, na.rm = TRUE), .groups = "drop")  %>% 
@@ -364,6 +461,7 @@ abline(v = 0.20, lty = 2)
 
 par(op)       
 dev.off()
+
 # ───────────────────────── 0. PACKAGES ───────────────────────────────────────
 library(dplyr)
 library(tidyr)

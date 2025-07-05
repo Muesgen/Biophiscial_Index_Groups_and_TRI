@@ -70,17 +70,32 @@ SDC_daily <- par_tbl[SDC_df, roll = "nearest"]   # keeps SDC order
 
 
 ## 1C  daily mean vegetation indices ------------------------------------------
-# ── 1. σ per date (mean |NIR–Red| across *all* points that day) -----------
-sigma_tbl <- SDC_daily %>%
-  summarise(sigma = mean(abs(nir - red), na.rm = TRUE), .by = date)   # dplyr 1.1+
 
+library(forecast)
 
 # make sure every table uses Date (not IDate or POSIXct)
 SDC_daily  <- SDC_daily  %>% mutate(date = as.Date(date))
-sigma_tbl  <- sigma_tbl  %>% mutate(date = as.Date(date))
+
+SDC_clean <- SDC_daily %>% 
+  arrange(plot, date) %>%          # keep each plot's dates in order
+  group_by(plot) %>% 
+  mutate(across(
+    all_of(band_cols),
+    ~ {
+      tsx <- ts(.x, frequency = 46)          # ≈ 8-day composites
+      as.numeric(
+        tsclean(tsx,
+                iterate         = 2,
+                replace.missing = FALSE)
+      )
+    }
+  )) %>% 
+  ungroup()
+
+
 
 # ── 2. compute indices for each row (no grouping needed) ------------------
-SDC_daily <- SDC_daily %>%
+SDC_daily <- SDC_clean %>%
   mutate(
     NDVI    = (nir - red) / (nir + red),
     GNDVI   = (nir - green) / (nir + red),
@@ -88,7 +103,7 @@ SDC_daily <- SDC_daily %>%
     GRVI    = (green - red) / (green + red),
     #OSAVI   = (nir - red) / (nir + red + 0.16),
     NIRv    = NDVI * nir,
-    NIRvPar = NIRv * par_mean,
+    NIRvP = NIRv * par_mean,
     kNDVI   = (1 - exp(-(nir - red)^2 / (2 * 0.2^2))) / (1 + exp(-(nir - red)^2 / (2 * 0.2^2))),
     #VMI     = (nir - swir1) * (nir - swir2) / (nir + swir1 + swir2),
     SIPI    = ((nir - blue) / (nir - red)) * -1,
@@ -102,23 +117,24 @@ SDC_daily <- SDC_daily %>%
   ) %>%
   select( -par_mean, - blue, -green, -nir, -red, -swir1, -swir2)          # drop helper column if you like
 
-
-## ------------------------------------------------------------------
-## 1  Load the daily PAR table you exported earlier
-## ------------------------------------------------------------------
-
-winsor <- function(x, k = 3) {
-  med  <- median(x, na.rm = TRUE)
-  mad_ <- mad(x, na.rm = TRUE)
-  upper <- med + k * mad_
-  lower <- med - k * mad_
-  pmin(pmax(x, lower), upper)
-}
+# make sure every table uses Date (not IDate or POSIXct)
+SDC_daily  <- SDC_daily  %>% mutate(date = as.Date(date))
 index_cols <- names(SDC_daily)[seq(6,17,1)]
 
-SDC_daily <- SDC_daily %>%
-  group_by(plot) %>%
-  mutate(across(all_of(index_cols), winsor)) %>%
+SDC_daily <- SDC_daily %>% 
+  arrange(plot, date) %>%          # keep each plot's dates in order
+  group_by(plot) %>% 
+  mutate(across(
+    all_of(index_cols),
+    ~ {
+      tsx <- ts(.x, frequency = 46)          # ≈ 8-day composites
+      as.numeric(
+        tsclean(tsx,
+                iterate         = 2,
+                replace.missing = FALSE)
+      )
+    }
+  )) %>% 
   ungroup()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -414,10 +430,10 @@ for (pl in unique(heatmap_df$plot)) {
   )
 }
 
-vi_order <- c("NDVI", "EVI",  "kNDVI", "NIRv", "NIRvPar",
+vi_order <- c("NDVI", "EVI",  "kNDVI", "NIRv", "NIRvP",
               "NMDI", "NDWI", "GVMI", "SIPI", "GRVI", "CIG", "GNDVI")
 
-
+library(ggrepel)
 dir.create("figures/VI_TRI_heatmaps_by_plot", showWarnings = FALSE)
 heat_all <- dplyr::left_join(heat_all, plot_meta, by = "plot")
 for (pl in unique(heat_all$plot)) {
@@ -446,12 +462,12 @@ for (pl in unique(heat_all$plot)) {
                  by = 0.1)
   n_bands <- length(breaks) - 1
   spectral_long <- colorRampPalette(
-    rev(RColorBrewer::brewer.pal(11, "Spectral"))
+    rev(RColorBrewer::brewer.pal(11, "RdYlBu"))
   )(n_bands)
   
   ## ── plot ──────────────────────────────────────────────────────
   p <- ggplot(df, aes(month_date, window_month, z = correlation)) +
-    geom_contour_filled(colour = "grey", size = 0.2,
+    geom_contour_filled(colour = "gray50", size = 0.2,
                         na.rm = TRUE, breaks = breaks) +
     facet_wrap(~VI, ncol = 4) +
     scale_x_date(date_breaks = "2 month",
@@ -469,17 +485,23 @@ for (pl in unique(heat_all$plot)) {
     stroke = 0.8,
     fill   = "yellow",
     colour = "black"
-  ) +
-    geom_text(                                     # ← optional NEW
-      data  = best_pts,
+    ) +
+    geom_label_repel(
+      data   = best_pts,
       aes(month_date, window_month,
           label = sprintf("r = %.2f", correlation)),
-      vjust = -0.5,
-      size  = 3
-    ) +
+      size        = 3,
+      fill        = alpha("white", 0.3),   # 60 % opacity white
+      colour      = "black",               # text colour
+      label.size  = 0,                     # no border line
+      label.r     = unit(0.1, "lines"),    # corner radius
+      box.padding   = 0.3,
+      point.padding = 0.2,
+      segment.color = NA                   # no leader line
+    )+
     
     labs(title = sprintf("VI–TRI rolling correlation — plot %s  (%s, %s)",
-                         pl, unique(df$species), unique(df$area)),
+                         pl, unique(df$species), unique(df$area)),fill = expression("Pearson "~italic(r)),
          x = "Month (prev year → current year)",
          y = "Window length (months)") +
     theme(strip.text = element_text(face = "bold")) +
@@ -572,3 +594,4 @@ for (sp in unique(heat_all$species)) {
   )
 }
 
+list.files("figures/VI_TRI_heatmaps_by_plot/")

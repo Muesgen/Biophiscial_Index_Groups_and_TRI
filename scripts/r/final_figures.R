@@ -115,7 +115,7 @@ p_species <- ggplot() +
 print(p_species)
 
 ggsave(
-  filename = "figures/final_figures/VI_top10_species_medians.png",
+  filename = "figures/final_figures/VI_top_10.png",
   plot     = p_species,
   width    = 11,
   height   = 5,
@@ -191,27 +191,6 @@ kbl(
 ) %>%
   kable_styling(latex_options = "hold_position")   # <- no "striped"
 
-# ── 4. print the medians for reference ────────────────────────────────────
-med_tbl
-
-best_combo <- heat_all %>% 
-  dplyr::filter(!is.na(correlation)) %>% 
-  group_by(plot, VI) %>% 
-  slice_max(correlation, n = 100, with_ties = FALSE) %>% 
-  ungroup()
-
-# ── 3. median r, DOY and window by VI and lag ─────────────────────────────
-med_details <- best_combo %>%
-  group_by(VI, lag) %>%
-  summarise(
-    median_r      = median(correlation, na.rm = TRUE),
-    median_doy    = median(doy, na.rm = TRUE),
-    median_window = median(window, na.rm = TRUE),
-    count         = n(),  # number of records (i.e., top correlations in this lag)
-    .groups       = "drop"
-  ) %>%
-  arrange(lag, median_r)
-
 
 library(lubridate)
 
@@ -270,107 +249,112 @@ ggsave("figures/final_figures/VI_top_100_timing.png", p2, height = 6, width = 13
 
 
 
-library(readxl)
+# ───────────────────────── 0. PACKAGES ───────────────────────────────────────
 library(dplyr)
 library(ggplot2)
-library(lubridate)
+library(ggrepel)
+library(readxl)
 library(RColorBrewer)
 
-dir.create("figures/VI_TRI_heatmaps_by_VI", showWarnings = FALSE)
-
+# ───────────────────────── 1. LOAD DATA (adjust paths) ───────────────────────
+heat_all  <- readRDS("corr_table_vi_tri.rds")
 plot_meta <- read_xlsx("data/vector_data/plot_metadata.xlsx")
 heat_all  <- left_join(heat_all, plot_meta, by = "plot")
 
-# plots to omit ------------------------------------------------------------
-omit_plots <- c("SF04","SF08","PF03","SF06","SF10",
-                "SF17","SF12","SF09")
-unique(heat_all$plot)
-
-# custom VI order ----------------------------------------------------------
-vi_order <- c("NDVI","EVI","OSAVI","kNDVI","NIRv","NIRvP",
-              "NMDI","NDWI","GVMI","SIPI","GRVI","CIG")
-
-# -------------------------------------------------------------------------
-## 2 -─ loop over every VI -------------------------------------------------
-for (vi in vi_order) {
-  
-  df <- heat_all %>% 
-    filter(VI == vi,
-           !plot %in% omit_plots,
-           !is.na(correlation)) %>% 
-    mutate(
-      ext_doy      = if_else(lag == 1, doy, doy + 365),
-      month_date   = as.Date(ext_doy - 1, origin = "2000-01-01"),
-      window_month = window * 8 / 30.437
-    )
-  length(unique(df$plot))
-  if (nrow(df) == 0) next                       # nothing to plot
-  
-  ## 2A – facet order & labels  -------------------------------------------
-  plot_levels <- df %>%                         # order = species → plot
-    distinct(plot, species) %>% 
-    arrange(species, plot) %>% 
-    pull(plot)
-  
-  df  <- df %>% mutate(plot = factor(plot, levels = plot_levels))
-  
-  facet_lab <- df %>% 
-    distinct(plot, species, area) %>% 
-    mutate(label = sprintf("%s – %s – %s", species, area, plot)) %>% 
-    select(plot, label) %>%          # ① keep only two columns
-    deframe()                        # ② convert to named vector
-  # named vector (names = plot)
-  
-  ## 2B – strongest point per plot  ---------------------------------------
-  best_pts <- df %>% 
-    filter(correlation > 0) %>% 
-    group_by(plot) %>% 
-    slice_max(correlation, n = 1, with_ties = FALSE) %>% 
-    ungroup()
-  
-  ## 2C – colour bands  ----------------------------------------------------
-  rng     <- range(df$correlation, na.rm = TRUE)
-  breaks  <- seq(floor(rng[1]/0.1)*0.1,
-                 ceiling(rng[2]/0.1)*0.1,
-                 by = 0.1)
-  spectral_long <- colorRampPalette(
-    rev(brewer.pal(11, "Spectral"))
-  )(length(breaks) - 1)
-  
-  ## 2D – plot  ------------------------------------------------------------
-  p <- ggplot(df, aes(month_date, window_month, z = correlation)) +
-    geom_contour_filled(colour = "grey40", size = 0.2,
-                        breaks = breaks, na.rm = TRUE) +
-    facet_wrap(~ plot, ncol = 4,
-               labeller = labeller(plot = facet_lab)) +
-    scale_x_date(date_breaks = "2 month", date_labels = "%b",
-                 expand = c(0, 0)) +
-    scale_y_continuous(breaks = seq(0,
-                                    ceiling(max(df$window_month, na.rm = TRUE)),
-                                    by = 4),
-                       expand = c(0, 0)) +
+# ───────────────────────── 2. PREPARE DATA — EVI for SF02 & SF07 ─────────────
+df <- heat_all %>% 
+  filter(plot %in% c("SF02", "SF07"),
+         tolower(VI) == "evi",
+         !is.na(correlation)) %>% 
+  mutate(
+    ext_doy      = if_else(lag == 1, doy, doy + 365),
+    month_date   = as.Date(ext_doy - 1, origin = "2000-01-01"),
+    window_month = window * 8 / 30.437,
     
-    geom_point(data = best_pts,
-               aes(month_date, window_month),
-               size = 2, shape = 21, stroke = 0.8,
-               fill = "yellow", colour = "black") +
-    geom_text(data = best_pts,
-              aes(month_date, window_month,
-                  label = sprintf("r = %.2f", correlation)),
-              vjust = -0.6, size = 3) +
-    
-    labs(title    = sprintf("VI–TRI rolling correlations for %s (2000 – 2022)", vi),
-         subtitle = "Facets ordered by species — strip shows species – area",
-         x        = "Month (previous year → current year)",
-         y        = "Window length (months)") +
-    theme_minimal(base_size = 11) +
-    theme(strip.text = element_text(face = "bold")) +
-    scale_fill_manual(values = spectral_long, name = "r")
+    ## ─ NEW ─ build facet label: 'SF02 – Species – Area'
+    plot_lab = sprintf("%s – %s – %s", plot, species, area)
+  )
+
+# ── strongest positive r per plot (now uses plot_lab) ────────────────────────
+best_pts <- df %>% 
+  filter(correlation > 0) %>% 
+  group_by(plot_lab) %>% 
+  slice_max(correlation, n = 1, with_ties = FALSE) %>% 
+  ungroup()
+
+# ── colour-band setup (unchanged) ────────────────────────────────────────────
+rng     <- range(df$correlation, na.rm = TRUE)
+breaks  <- seq(floor(rng[1] / 0.1) * 0.1,
+               ceiling(rng[2] / 0.1) * 0.1,
+               by = 0.1)
+n_bands <- length(breaks) - 1
+spectral_long <- colorRampPalette(
+  rev(RColorBrewer::brewer.pal(11, "RdYlBu"))
+)(n_bands)
+
+x_grid <- seq(min(df$month_date), max(df$month_date), by = "2 month")
+y_grid <- seq(0, ceiling(max(df$window_month, na.rm = TRUE)), by = 2)
+
+# ───────────────────────── 3. BUILD THE GRID PLOT ────────────────────────────
+p <- ggplot(df, aes(month_date, window_month, z = correlation)) +
+  geom_contour_filled(colour = "gray50", size = 0.2,
+                      na.rm = TRUE, breaks = breaks) +
+  facet_wrap(~plot_lab, ncol = 2) +             # ← uses new label
+  scale_x_date(date_breaks = "2 month",
+               date_labels = "%b",
+               expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(0,
+                                  ceiling(max(df$window_month, na.rm = TRUE)), 2),
+                     expand = c(0, 0)) +
   
-  ggsave(file.path("figures/VI_TRI_heatmaps_by_VI",
-                   sprintf("VI_TRI_contour_%s.png", vi)),
-         p, width = 14, height = 8, dpi = 300, bg = "white")
-}
+  ## highlight the max-r points ------------------------------------------------
+geom_point(
+  data   = best_pts,
+  aes(month_date, window_month),
+  size   = 2,
+  shape  = 21,
+  stroke = 0.8,
+  fill   = "yellow",
+  colour = "black"
+) +
+  geom_label_repel(
+    data   = best_pts,
+    aes(month_date, window_month,
+        label = sprintf("r = %.2f", correlation)),
+    size        = 3,
+    fill        = alpha("white", 0.3),
+    colour      = "black",
+    label.size  = 0,
+    label.r     = unit(0.1, "lines"),
+    box.padding   = 0.3,
+    point.padding = 0.2,
+    segment.color = NA
+  ) +
+  
+  labs(
+    title = "EVI–TRI rolling correlation — plots SF02 & SF07",
+    fill  = expression("Pearson "~italic(r)),
+    x     = "Month (prev year → current year)",
+    y     = "Window length (months)"
+  ) +
+  scale_fill_manual(values = spectral_long) +
+  theme(title  = element_text(face = "bold"),
+        plot.title  = element_text(hjust = 0.5),
+        strip.text  = element_text(face = "bold"))+
+  geom_vline(xintercept = x_grid,
+             colour = "grey50", linetype = "dotted", size = 0.3) +
+  geom_hline(yintercept = y_grid,
+             colour = "grey50", linetype = "dotted", size = 0.3)
+
+print(p)
+# ───────────────────────── 4. SAVE THE FIGURE ────────────────────────────────
+
+ggsave(
+  filename = "figures/final_figures/EVI_TRI_SF02_SF07_grid.png",
+  plot     = p,
+  width    = 12, height = 5, dpi = 300, bg = "white"
+)
+
 
 # ───────────────────────── 0. PACKAGES ───────────────────────────────────────
 # install.packages(c("dplyr", "tidyr", "dendextend", "pals"))   # first time only
@@ -438,29 +422,47 @@ vi_mat <- heat_all                                                     %>%
 
 dend_vi <- make_dend(vi_mat, h_cut = 0.20)
 
-# ───────────────────────── 5. PLOT GRID (base graphics) ──────────────────────
-png("figures/final_figures/dendrogram_grid.png", width = 4000, height = 1750, res = 300)  # adjust size/res as needed
+# ───────────────────────── 5. EXPORT SEPARATE DENDROGRAMS ───────────────────
 
-op <- par(no.readonly = TRUE)                 # save current settings
-par(mfrow = c(1, 2))                          # 1 row × 2 columns
+# Common device specs
+fig_w  <- 2000   # pixels   (≈ 170 mm at 300 dpi)
+fig_h  <- 1750   # pixels   (≈ 150 mm at 300 dpi)
+fig_res <- 300   # dpi
 
-## — left panel: VI similarity tree ------------------------------------------
-par(mar = c(4, 2, 2, right_lines(dend_vi)))
+# Keep a copy of the current par settings
+op <- par(no.readonly = TRUE)
+
+## ---------- 5a. VI-similarity tree (dend_vi) -------------------------------
+png("figures/final_figures/dendrogram_vi.png",
+    width = fig_w, height = fig_h, res = fig_res)
+
+par(mfrow = c(1, 1),                      # single panel
+    mar = c(4, 2, 2, right_lines(dend_vi)))  # dynamic right margin
+
 plot(dend_vi, horiz = TRUE,
      main = "VIs Clustered by TRI Correlation Pattern",
-     xlab  = "1 − Pearson r")
-abline(v = 0.20, lty = 2)
-
-## — right panel: plot similarity tree -----------------------------------------
-par(mar = c(4, 2, 2, right_lines(dend_plot)))
-plot(dend_plot, horiz = TRUE,
-     main = "Plots Clustered by kNDVI ↔ TRI Correlation Pattern",
      xlab = "1 − Pearson r")
 abline(v = 0.20, lty = 2)
 
+dev.off()                                 # close first device
 
-par(op)       
-dev.off()
+## ---------- 5b. Plot-similarity tree (dend_plot) ---------------------------
+png("figures/final_figures/dendrogram_plot.png",
+    width = fig_w, height = fig_h, res = fig_res)
+
+par(mfrow = c(1, 1),
+    mar = c(4, 2, 2, right_lines(dend_plot)))
+
+plot(dend_plot, horiz = TRUE,
+     main = "Plots Clustered by EVI ↔ TRI Correlation Pattern",
+     xlab = "1 − Pearson r")
+abline(v = 0.20, lty = 2)
+
+dev.off()                                 # close second device
+
+# Restore original graphics settings
+par(op)
+
 
 # ───────────────────────── 0. PACKAGES ───────────────────────────────────────
 library(dplyr)
@@ -473,7 +475,7 @@ heat_all <- readRDS("corr_table_vi_tri.rds")   # adjust path as needed
 
 # ───────────────────────── 2. PLOT × PLOT CORR  (kNDVI only) ────────────────
 corr_plot <- heat_all %>% 
-  dplyr::filter(tolower(VI) == "kndvi") %>% 
+  dplyr::filter(tolower(VI) == "evi") %>% 
   mutate(id = paste0("w", window, "_d", doy, "_lag", lag)) %>% 
   group_by(id, plot) %>% 
   summarise(corr = mean(correlation, na.rm = TRUE), .groups = "drop") %>% 
@@ -482,7 +484,7 @@ corr_plot <- heat_all %>%
   cor(use = "pairwise.complete.obs")
 
 p1 <- ggcorrplot(corr_plot, type = "upper", lab = TRUE, 
-                 title = "Plot × Plot (kNDVI)")
+                 title = "Plot × Plot (EVI)")
 
 # ───────────────────────── 3. VI × VI CORR  (all plots) ──────────────────────
 corr_vi <- heat_all %>% 

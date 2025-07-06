@@ -66,7 +66,7 @@ par_tbl[ , par_mean :=
          by = plot]
 
 setkey(par_tbl, plot, date)                  # key on both cols
-SDC_daily <- par_tbl[SDC_df, roll = "nearest"]   # keeps SDC order
+SDC_raw <- par_tbl[SDC_df, roll = "nearest"]   # keeps SDC order
 
 
 ## 1C  daily mean vegetation indices ------------------------------------------
@@ -74,9 +74,10 @@ SDC_daily <- par_tbl[SDC_df, roll = "nearest"]   # keeps SDC order
 library(forecast)
 
 # make sure every table uses Date (not IDate or POSIXct)
-SDC_daily  <- SDC_daily  %>% mutate(date = as.Date(date))
+SDC_raw  <- SDC_raw  %>% mutate(date = as.Date(date))
+band_cols <- c("blue","green","red","nir","swir1","swir2")
 
-SDC_clean <- SDC_daily %>% 
+SDC_clean <- SDC_raw %>% 
   arrange(plot, date) %>%          # keep each plot's dates in order
   group_by(plot) %>% 
   mutate(across(
@@ -95,7 +96,7 @@ SDC_clean <- SDC_daily %>%
 
 
 # ── 2. compute indices for each row (no grouping needed) ------------------
-SDC_daily <- SDC_clean %>%
+VI_raw <- SDC_clean %>%
   mutate(
     NDVI    = (nir - red) / (nir + red),
     GNDVI   = (nir - green) / (nir + red),
@@ -118,10 +119,10 @@ SDC_daily <- SDC_clean %>%
   select( -par_mean, - blue, -green, -nir, -red, -swir1, -swir2)          # drop helper column if you like
 
 # make sure every table uses Date (not IDate or POSIXct)
-SDC_daily  <- SDC_daily  %>% mutate(date = as.Date(date))
-index_cols <- names(SDC_daily)[seq(6,17,1)]
+VI_raw  <- VI_raw  %>% mutate(date = as.Date(date))
+index_cols <- names(VI_raw)[seq(6,17,1)]
 
-SDC_daily <- SDC_daily %>% 
+VI_clean <- VI_raw %>% 
   arrange(plot, date) %>%          # keep each plot's dates in order
   group_by(plot) %>% 
   mutate(across(
@@ -149,7 +150,7 @@ chronologies_by_plot <- read.csv("data/analysis_ready_data/TRI_chronologies.csv"
 accum_windows <- 1:91                          # candidate window lengths
 
 ## 3A  long table: one VI per row ------------------------------------------------
-SDC_long <- SDC_daily |>
+SDC_long <- VI_clean |>
   pivot_longer(
     -c(plot, date, year, doy, area),                  # keep date + calendar cols
     names_to  = "VI", values_to = "value"
@@ -595,3 +596,4 @@ for (sp in unique(heat_all$species)) {
 }
 
 list.files("figures/VI_TRI_heatmaps_by_plot/")
+

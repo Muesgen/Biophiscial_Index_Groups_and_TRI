@@ -42,65 +42,69 @@ p1 <- ggplot(best_combo, aes(VI, correlation)) +
 
 ggsave("figures/final_figures/VI_top_10.png", p1, height = 4, width = 11, bg = "white")
 
-library(scales)   
+library(tidytext)    # <-- adds reorder_within() & scale_x_reordered()
+library(scales)      # already loaded
 
-# ── 1. species-level median r (one row per species × VI) ──────────────────────
-species_level <- best_combo %>%               
-  group_by(species, VI) %>% 
+## ── 1.  (unchanged) best_combo has lag 0 & 1, top-10 per plot × VI × lag ──
+## ── 2.  median r per lag × VI  (unchanged) --------------------------------
+med_tbl <- best_combo %>% 
+  group_by(lag, VI) %>% 
+  summarise(median_r = median(correlation), .groups = "drop")
+
+## ── 3.  NEW → add a ‘within-lag’ ordering factor --------------------------
+best_combo <- best_combo %>% 
+  left_join(med_tbl, by = c("lag", "VI")) %>%               # bring in medians
+  mutate(VI_ord = reorder_within(VI, median_r, lag))        # order per panel
+
+species_level <- best_combo %>%                             # species medians
+  group_by(lag, species, VI, VI_ord) %>%                    # keep VI_ord
   summarise(species_median = median(correlation), .groups = "drop")
 
-# ── 2. counts of plots per species ────────────────────────────────────────────
-species_counts <- best_combo %>% 
-  count(species, name = "n") %>%                 # raw plot count
-  mutate(
-    n = n/120,     
-  )
+med_tbl <- med_tbl %>% 
+  mutate(VI_ord = reorder_within(VI, median_r, lag))        # for the labels
 
-# ── 3. named vector for legend labels ─────────────────────────────────────────
+## ── 4.  Species counts (legend) stays exactly as before --------------------
+species_counts <- best_combo %>% 
+  count(species, name = "n") %>% 
+  mutate(n = n / 120)
+
 species_labs <- setNames(
   paste0(species_counts$species, " (n = ", species_counts$n, ")"),
   species_counts$species
 )
-# e.g. "FASY" → "FASY (n = 9)"
 
-# ── 4. build the figure ───────────────────────────────────────────────────────
-p_species <- ggplot() +
-  # background boxplots
+## ── 5.  Build the facetted plot  ------------------------------------------
+p_species_fac <- ggplot() +
   geom_boxplot(
-    data    = best_combo,
-    aes(x = VI, y = correlation),
-    outlier.shape = NA,
-    width   = .6,
-    colour  = "grey40",
-    fill    = "grey90"
+    data = best_combo,
+    aes(x = VI_ord, y = correlation),
+    outlier.shape = NA, width = .6,
+    colour = "grey40",  fill = "grey90"
   ) +
-  # species-level median lines
   geom_line(
-    data    = species_level,
-    aes(x = VI, y = species_median, group = species, colour = species),
+    data = species_level,
+    aes(x = VI_ord, y = species_median,
+        group = species, colour = species),
     linewidth = .7, alpha = .2
   ) +
-  # species-level median points
   geom_point(
-    data    = species_level,
-    aes(x = VI, y = species_median, colour = species),
+    data = species_level,
+    aes(x = VI_ord, y = species_median, colour = species),
     size = 2
   ) +
-  # overall median-r labels on box tops
   geom_text(
     data = med_tbl,
-    aes(VI, median_r, label = sprintf("%.2f", median_r)),
+    aes(VI_ord, median_r, label = sprintf("%.2f", median_r)),
     vjust = -0.6, size = 3
   ) +
   scale_colour_brewer(
-    palette = "Dark2",
-    name    = "Species",
-    labels  = species_labs          # ← counts appear here
+    palette = "Dark2", name = "Species", labels = species_labs
   ) +
+  scale_x_reordered() +                       # ← strips the “…___lag” suffix
   labs(
     title    = "Top-10 VI–TRI correlations (species medians)",
-    subtitle = "Lines connect each species’ median correlation across vegetation indices",
-    x        = "Vegetation index (ordered by overall median r)",
+    subtitle = "Each panel orders vegetation indices by that lag’s median r",
+    x        = "Vegetation index (ordered within lag)",
     y        = "Pearson correlation (r)"
   ) +
   theme_minimal(base_size = 11) +
@@ -109,16 +113,24 @@ p_species <- ggplot() +
     panel.grid.major.x = element_line(colour = "grey85"),
     panel.grid.major.y = element_blank(),
     legend.position    = "right"
-  )
+  ) +
+  facet_wrap(
+    ~ lag, ncol = 1, scales = "free_x",
+    labeller = labeller(
+      lag = c(
+        `0` = "Lag 0:\nVI & TRI in the same year",
+        `1` = "Lag 1:\nVI measured one year before TRI"
+      )
+    )
+  ) 
 
-# ── 5. display & save ─────────────────────────────────────────────────────────
-print(p_species)
+p_species_fac      # print the figure
 
 ggsave(
-  filename = "figures/final_figures/VI_top_10.png",
-  plot     = p_species,
+  filename = "figures/final_figures/VI_top_10_lag.png",
+  plot     = p_species_fac,
   width    = 11,
-  height   = 5,
+  height   = 8,
   dpi      = 300,
   bg       = "white"
 )

@@ -60,7 +60,7 @@ setDT(par_tbl)[, date := as.IDate(date)]
 
 par_tbl[ , par_mean :=
            frollmean(par_mean,             # data.table’s fast roll
-                     n = 16,               # 8-day window
+                     n = 8,               # 8-day window
                      align = "right",
                      na.rm = TRUE),
          by = plot]
@@ -192,49 +192,44 @@ cum_TRI_filtered <- SDC_cum_long |>
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. CORRELATION HEAT-TABLE  &  best (window, DOY)
 # ─────────────────────────────────────────────────────────────────────────────
-heatmap_df <- cum_TRI_filtered |>
+heat_curr <- cum_TRI_filtered |>
   group_by(plot, forest_type, VI, window, doy) |>
   summarise(
-    correlation = if (sum(!is.na(cum_value) & !is.na(TRI)) > 1)
-      cor(cum_value, TRI, use = "complete.obs")
+    n          = sum(!is.na(cum_value) & !is.na(TRI)),         # how many points?
+    correlation = if (n >= 3) cor(cum_value, TRI, use = "complete.obs")
+    else NA_real_,
+    p_value     = if (n >= 3) cor.test(cum_value, TRI)$p.value # <- NEW
     else NA_real_,
     .groups = "drop"
-  )
-
-heat_curr <- heatmap_df %>% 
+  ) |>
   mutate(lag = 0)
 
 # ——— 2. build the lag‐1 correlations ——————————————————————
 # Start from your cum‐values + TRI joined table:
-heat_prev <- cum_TRI_filtered %>%
-  # pull out only what we need, and rename:
-  select(
-    plot, forest_type, VI, window, doy,
-    cum_prev = cum_value,
-    year_prev = year
-  ) %>%
-  # shift the year so that cum_prev comes from Y−1
-  mutate(year = year_prev + 1) %>%
-  # bring in *only* the current‐year TRI as TRI_current
+heat_prev <- cum_TRI_filtered %>% 
+  select(plot, forest_type, VI, window, doy,
+         cum_prev  = cum_value,
+         year_prev = year) %>% 
+  mutate(year = year_prev + 1) %>% 
   inner_join(
     chronologies_by_plot %>% 
       select(plot, year, TRI_current = TRI),
     by = c("plot", "year")
-  ) %>%
-  # now correlate the lagged cum_prev vs. TRI_current
-  group_by(plot, forest_type, VI, window, doy) %>%
+  ) %>% 
+  group_by(plot, forest_type, VI, window, doy) %>% 
   summarise(
-    correlation = if (sum(!is.na(cum_prev) & !is.na(TRI_current)) > 1)
-      cor(cum_prev, TRI_current, use = "complete.obs")
+    n          = sum(!is.na(cum_prev) & !is.na(TRI_current)),
+    correlation = if (n >= 3) cor(cum_prev, TRI_current, use = "complete.obs")
+    else NA_real_,
+    p_value     = if (n >= 3) cor.test(cum_prev, TRI_current)$p.value
     else NA_real_,
     .groups = "drop"
-  ) %>%
+  ) %>% 
   mutate(lag = 1)
 
-# 3. Bind them and plot as before:
 heat_all <- bind_rows(heat_curr, heat_prev)
-
 saveRDS(heat_all, "corr_table_vi_tri.rds")
+
 
 best_combo <- heat_all |>
   dplyr::filter(!is.na(correlation)) |>           # keep only positive r
@@ -435,81 +430,130 @@ vi_order <- c("NDVI", "EVI",  "kNDVI", "NIRv", "NIRvP",
               "NMDI", "NDWI", "GVMI", "SIPI", "GRVI", "CIG", "GNDVI")
 
 library(ggrepel)
+
 dir.create("figures/VI_TRI_heatmaps_by_plot", showWarnings = FALSE)
-heat_all <- dplyr::left_join(heat_all, plot_meta, by = "plot")
+
+# add metadata (species, area, …)
+heat_all <- left_join(heat_all, plot_meta, by = "plot")
+
+alpha_thr <- 0.05     # significance threshold
+fade_opacity <- 0.25  # alpha for non-significant cells (0–1)
+
+alpha_thr   <- 0.05   # p-value threshold for significance
+
 for (pl in unique(heat_all$plot)) {
   
+  ## 1. data -------------------------------------------------------------
   df <- heat_all %>%
     dplyr::filter(plot == pl, !is.na(correlation)) %>%
     mutate(
-      VI          = factor(VI, levels = vi_order),   #
+      VI           = factor(VI, levels = vi_order),
       ext_doy      = if_else(lag == 1, doy, doy + 365),
       month_date   = as.Date(ext_doy - 1, origin = "2000-01-01"),
-      window_month = window * 8 / 30.437
+      window_month = window * 8 / 30.437,
+      sig          = p_value < alpha_thr
     )
   if (nrow(df) == 0) next
   
-  ## ── strongest positive r per VI ───────────────────────────────
-  best_pts <- df %>%                               # ← NEW
-    dplyr::filter(correlation > 0) %>%                    # keep positives only
-    group_by(VI) %>%                               # one row per facet
+  df_nonsig <- df %>% dplyr::filter(!sig)
+  
+  best_pts <- df %>%                       # ← same as before
+    dplyr::filter(sig, correlation > 0) %>% 
+    group_by(VI) %>% 
     slice_max(correlation, n = 1, with_ties = FALSE) %>% 
-    ungroup()                                      # ← NEW
+    ungroup()
   
-  ## colour-band setup (unchanged) --------------------------------
-  rng     <- range(df$correlation, na.rm = TRUE)
-  breaks  <- seq(floor(rng[1]/0.1)*0.1,
-                 ceiling(rng[2]/0.1)*0.1,
-                 by = 0.1)
-  n_bands <- length(breaks) - 1
-  spectral_long <- colorRampPalette(
-    rev(RColorBrewer::brewer.pal(11, "RdYlBu"))
-  )(n_bands)
+  rng    <- range(df$correlation, na.rm = TRUE)
+  breaks <- seq(floor(rng[1]/0.1)*0.1,
+                ceiling(rng[2]/0.1)*0.1,
+                by = 0.1)
+  pal <- colorRampPalette(rev(brewer.pal(11, "RdYlBu")))(length(breaks) - 1)
+  # set scale limits to the range of those indices
+  nbins <- length(breaks) - 1
+  mid_vals <- (head(breaks, -1) + tail(breaks, -1)) / 2    # same length as nbins
   
-  ## ── plot ──────────────────────────────────────────────────────
-  p <- ggplot(df, aes(month_date, window_month, z = correlation)) +
-    geom_contour_filled(colour = "gray50", size = 0.2,
-                        na.rm = TRUE, breaks = breaks) +
-    facet_wrap(~VI, ncol = 4) +
-    scale_x_date(date_breaks = "2 month",
-                 date_labels = "%b",
-                 expand = c(0, 0)) +
-    scale_y_continuous(breaks = seq(0, ceiling(max(df$window_month, na.rm = TRUE)), 2),
-                       expand = c(0, 0)) +
+  ## 2. plot ------------------------------------------------------------
+  p <- ggplot() +
     
-    ## — highlight the max-r point — -------------------------------
-  geom_point(                                    # ← NEW
-    data   = best_pts,
-    aes(month_date, window_month),
-    size   = 2,
-    shape  = 21,
-    stroke = 0.8,
-    fill   = "yellow",
-    colour = "black"
-    ) +
-    geom_label_repel(
-      data   = best_pts,
+    geom_contour_filled(
+      data   = df,              # 1st call (the full field)
       aes(month_date, window_month,
-          label = sprintf("r = %.2f", correlation)),
-      size        = 3,
-      fill        = alpha("white", 0.3),   # 60 % opacity white
-      colour      = "black",               # text colour
-      label.size  = 0,                     # no border line
-      label.r     = unit(0.1, "lines"),    # corner radius
-      box.padding   = 0.3,
-      point.padding = 0.2,
-      segment.color = NA                   # no leader line
+          z    = correlation,
+          fill = after_stat(as.numeric(level))),   # ← numeric
+      breaks    = breaks,
+      colour    = NA, linewidth = 0,
+      na.rm     = TRUE
+    ) +
+    
+    geom_contour_filled(
+      data   = df_nonsig,       # 2nd call (the veil)
+      aes(month_date, window_month,
+          z    = correlation,
+          fill = after_stat(as.numeric(level))),   # ← numeric
+      breaks    = breaks,
+      fill      = "white", alpha = 0.4,
+      colour    = NA, linewidth = 0,
+      na.rm     = TRUE
+    ) +
+    ## 2c  optional grey isolines for context
+    geom_contour(
+      data   = df,
+      aes(month_date, window_month, z = correlation),
+      colour = "grey70", size = 0.15,
+      breaks = breaks
+    ) +
+    
+  
+    scale_fill_stepsn(
+      colours = pal,
+      limits  = c(1, nbins),           # because the data are 1…nbins
+      breaks  = seq_len(nbins),        # tick marks 1, 2, …
+      labels  = sprintf("%.1f", mid_vals),   # show –0.6, –0.5, … instead
+      name    = expression("Pearson "~italic(r))
     )+
     
-    labs(title = sprintf("VI–TRI rolling correlation — plot %s  (%s, %s)",
-                         pl, unique(df$species), unique(df$area)),fill = expression("Pearson "~italic(r)),
-         x = "Month (prev year → current year)",
-         y = "Window length (months)") +
-    theme(strip.text = element_text(face = "bold")) +
-    scale_fill_manual(values = spectral_long)
-  
+    ## 2e  highlight best points (unchanged)
+    {if (nrow(best_pts) > 0)
+      list(
+        geom_point(
+          data = best_pts,
+          aes(month_date, window_month),
+          size = 2, shape = 21, stroke = .8,
+          fill = "yellow", colour = "black"
+        ),
+        geom_label_repel(
+          data   = best_pts,
+          aes(month_date, window_month,
+              label = sprintf("r = %.2f", correlation)),
+          size          = 3,
+          fill          = alpha("white", 0.3),
+          colour        = "black",
+          label.size    = 0,
+          label.r       = unit(0.1, "lines"),
+          box.padding   = 0.3,
+          point.padding = 0.2,
+          segment.color = NA
+        )
+      )
+    } +
+    
+    facet_wrap(~ VI, ncol = 4) +
+    scale_x_date(date_breaks = "2 month", date_labels = "%b", expand = c(0,0)) +
+    scale_y_continuous(
+      breaks = seq(0, ceiling(max(df$window_month, na.rm = TRUE)), 2),
+      expand = c(0, 0)
+    ) +
+    labs(
+      title = sprintf("VI–TRI rolling correlation — plot %s  (%s, %s)",
+                      pl, unique(df$species), unique(df$area)),
+      x     = "Month (prev year → current year)",
+      y     = "Window length (months)"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(strip.text = element_text(face = "bold"))
+  p
   ggsave(
-    filename = file.path(
+    file.path(
       "figures/VI_TRI_heatmaps_by_plot",
       sprintf("%s_%s_VI_TRI_contour_%s.png",
               unique(df$species), unique(df$area), pl)),
@@ -517,7 +561,6 @@ for (pl in unique(heat_all$plot)) {
     width  = 16, height = 8, dpi = 300, bg = "white"
   )
 }
-
 
 for (sp in unique(heat_all$species)) {
   

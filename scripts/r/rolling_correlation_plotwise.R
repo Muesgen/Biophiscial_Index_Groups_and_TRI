@@ -435,10 +435,6 @@ dir.create("figures/VI_TRI_heatmaps_by_plot", showWarnings = FALSE)
 
 # add metadata (species, area, …)
 heat_all <- left_join(heat_all, plot_meta, by = "plot")
-
-alpha_thr <- 0.05     # significance threshold
-fade_opacity <- 0.25  # alpha for non-significant cells (0–1)
-
 alpha_thr   <- 0.05   # p-value threshold for significance
 
 for (pl in unique(heat_all$plot)) {
@@ -458,9 +454,9 @@ for (pl in unique(heat_all$plot)) {
   df_nonsig <- df %>% dplyr::filter(!sig)
   
   best_pts <- df %>%                       # ← same as before
-    dplyr::filter(sig, correlation > 0) %>% 
+    dplyr::filter(sig) %>% 
     group_by(VI) %>% 
-    slice_max(correlation, n = 1, with_ties = FALSE) %>% 
+    slice_max(abs(correlation), n = 1, with_ties = FALSE) %>% 
     ungroup()
   
   rng    <- range(df$correlation, na.rm = TRUE)
@@ -470,7 +466,10 @@ for (pl in unique(heat_all$plot)) {
   pal <- colorRampPalette(rev(brewer.pal(11, "RdYlBu")))(length(breaks) - 1)
   # set scale limits to the range of those indices
   nbins <- length(breaks) - 1
-  mid_vals <- (head(breaks, -1) + tail(breaks, -1)) / 2    # same length as nbins
+  mid_vals <- (head(breaks, -1) + tail(breaks, -1)) / 2       # numeric
+  
+  lab_vals <- sprintf("%.2f", mid_vals)                        # two decimals
+  lab_vals[lab_vals == "-0.00"] <- "0.00"                      # tidy the zero
   
   ## 2. plot ------------------------------------------------------------
   p <- ggplot() +
@@ -491,7 +490,7 @@ for (pl in unique(heat_all$plot)) {
           z    = correlation,
           fill = after_stat(as.numeric(level))),   # ← numeric
       breaks    = breaks,
-      fill      = "white", alpha = 0.4,
+      fill      = "white", alpha = 0.5,
       colour    = NA, linewidth = 0,
       na.rm     = TRUE
     ) +
@@ -508,8 +507,13 @@ for (pl in unique(heat_all$plot)) {
       colours = pal,
       limits  = c(1, nbins),           # because the data are 1…nbins
       breaks  = seq_len(nbins),        # tick marks 1, 2, …
-      labels  = sprintf("%.1f", mid_vals),   # show –0.6, –0.5, … instead
-      name    = expression("Pearson "~italic(r))
+      labels  = lab_vals,   # show –0.6, –0.5, … instead
+      name    = expression("Pearson "~italic(r)),
+      guide   = guide_colourbar(            # ⬅️ tweak the bar here
+        barheight = unit(5, "cm"),         # make it taller (try 8–15 cm)
+        barwidth  = unit(0.5, "cm"),        # keep it slim
+        ticks.colour = "black"
+      )
     )+
     
     ## 2e  highlight best points (unchanged)

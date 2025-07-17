@@ -110,12 +110,13 @@ heat_all  <- left_join(heat_all, plot_meta, by = "plot")
 top10 <- heat_all %>%
   filter(!is.na(correlation)) %>%
   group_by(plot, VI) %>%
-  slice_max(correlation, n = 10, with_ties = FALSE) %>%
+  slice_max(abs(correlation),               # ← use magnitude, not sign
+            n = 10, with_ties = FALSE) %>%
   ungroup()
 
 medians <- top10 %>%
   group_by(plot, VI, species) %>%
-  summarise(median_r = median(correlation), .groups = "drop")
+  summarise(median_r = median(abs(correlation)), .groups = "drop")
 
 # ───────────────────────── 3.  PIVOT WIDER  ─────────────────────
 vi_order <- c("NDVI","GNDVI","CIG","EVI","kNDVI","NIRv","NIRvP",
@@ -518,22 +519,23 @@ ggsave(
   width    = 6, height = 4, dpi = 300, bg = "white"
 )
 
-# ──────────────────────────── 0. PACKAGES ──────────────────────────────
+# ───────────────────────── 0. PACKAGES ───────────────────────────────────────
+# install.packages(c("dplyr", "tidyr", "dendextend", "pals"))   # first time only
 library(dplyr)
 library(tidyr)
 library(dendextend)
 library(pals)
 library(readxl)
-
-# ──────────────────────────── 1. LOAD DATA ─────────────────────────────
-heat_all  <- readRDS("corr_table_vi_tri.rds")
+# ───────────────────────── 1. LOAD DATA ──────────────────────────────────────
+heat_all <- readRDS("corr_table_vi_tri.rds")     # adjust path if required
 plot_meta <- read_xlsx("data/vector_data/plot_metadata.xlsx")
 heat_all  <- left_join(heat_all, plot_meta, by = "plot")
 
-# ──────────────────────────── 2. HELPERS ───────────────────────────────
+# ───────────────────────── 2. HELPERS ────────────────────────────────────────
+## make a coloured dendrogram from a correlation matrix -----------------------
 make_dend <- function(corr_mat, h_cut, palette_fun = glasbey) {
-  d    <- as.dist(1 - corr_mat)
-  hc   <- hclust(d, method = "average")
+  d   <- as.dist(1 - corr_mat)            # dissimilarity = 1 − r
+  hc  <- hclust(d, method = "average")
   dend <- as.dendrogram(hc)
   
   k    <- length(unique(cutree(hc, h = h_cut)))
@@ -545,68 +547,69 @@ make_dend <- function(corr_mat, h_cut, palette_fun = glasbey) {
   hang.dendrogram(dend, hang = 0.1)
 }
 
+## find right-margin lines needed for labels ----------------------------------
 right_lines <- function(dend) {
   w_in   <- max(strwidth(labels(dend), units = "inches"))
-  char_w <- par("cin")[1]
+  char_w <- par("cin")[1]                 # width of one margin line (inches)
   ceiling(w_in / char_w) + 1
 }
 
-# ──────────────────────────── 3. BUILD PLOT‐SIMILARITY DENDROGRAM ─────────
-kndvi_mat <- heat_all %>%
-  filter(tolower(VI) == "kndvi") %>%
-  mutate(time_id = paste0("w", window, "_d", doy, "_lag", lag)) %>%
-  group_by(time_id, plot) %>%
-  summarise(corr = mean(correlation, na.rm = TRUE), .groups = "drop") %>%
-  pivot_wider(names_from = plot, values_from = corr, values_fill = NA) %>%
-  select(-time_id) %>%
+# ───────────────────────── 3. DENDROGRAM 1  (plots × plots | kNDVI) ──────────
+kndvi_mat <- heat_all                                                  %>% 
+  dplyr::filter(tolower(VI) == "kndvi")                                       %>% 
+  mutate(time_id = paste0("w", window, "_d", doy, "_lag", lag))        %>% 
+  group_by(time_id, plot)                                              %>% 
+  summarise(corr = mean(correlation, na.rm = TRUE), .groups = "drop")  %>% 
+  pivot_wider(names_from = plot, values_from = corr, values_fill = NA) %>% 
+  select(-time_id)                                                     %>% 
   cor(use = "pairwise.complete.obs")
 
 dend_plot <- make_dend(kndvi_mat, h_cut = 0.20)
 
-# ──────────────────────────── 4. INITIAL LABELS ─────────────────────────
-orig_plot_ids <- labels(dend_plot)
-species_vec   <- plot_meta$species[match(orig_plot_ids, plot_meta$plot)]
-initial_labels <- paste(orig_plot_ids, species_vec, sep = " – ")
-labels(dend_plot) <- initial_labels
+## --------- ► neue Labels: "Plot – Species"  ------------------
+labs         <- labels(dend_plot)                             # aktuelle Plots
+sp_vec       <- plot_meta$species[match(labs, plot_meta$plot)]
+new_labels   <- paste(labs, sp_vec, sep = " – ")
 
-# ──────────────────────────── 5. MANUAL HIGHLIGHTING ────────────────────
-# Plots ohne signifikante Korrelation:
-no_corr  <- c("SF17", "SF16", "PF03")
-# Plots mit genau einer sign. Korrelation:
-one_corr <- c("SF12", "SF11", "PF02", "SF07", "SF06", "SF03", "SF04")
-# Welcher VI korreliert jeweils:
-vi_manual <- c(
-  SF12 = "SIPI",
-  SF11 = "GNDVI/NDVI",
-  PF02 = "SIPI",
-  SF07 = "NMDI/NDWI",
-  SF06 = "SIPI",
-  SF03 = "SIPI",
-  SF04 = "SIPI"
-)
+labels(dend_plot) <- new_labels                               # ersetzen
+labels_colors(dend_plot) <- get_leaves_branches_col(dend_plot) # Farben beibehalten
 
-# 5a. Erstelle die endgültigen Labels:  
-final_labels <- mapply(function(lbl, id) {
-  if (id %in% one_corr) {
-    paste0(lbl, " (Only ", vi_manual[id], ")")
-  } else {
-    lbl
-  }
-}, initial_labels, orig_plot_ids, USE.NAMES = FALSE)
+# ───────────────────────── 4. DENDROGRAM 2  (VI × VI | all plots) ────────────
+vi_mat <- heat_all                                                     %>% 
+  mutate(rec_id = paste(plot, "w", window, "d", doy, "lag", lag, sep = "_")) %>% 
+  group_by(rec_id, VI)                                                 %>% 
+  summarise(corr = mean(correlation, na.rm = TRUE), .groups = "drop")  %>% 
+  pivot_wider(names_from = VI, values_from = corr, values_fill = NA)   %>% 
+  select(-rec_id)                                                      %>% 
+  cor(use = "pairwise.complete.obs")
 
-labels(dend_plot) <- final_labels
+dend_vi <- make_dend(vi_mat, h_cut = 0.20)
 
-# 5b. Passe die Label-Farben an: grau für alle in no_corr und one_corr
-orig_cols <- labels_colors(dend_plot)
-grey_out_ids <- c(no_corr, one_corr)
-cols <- ifelse(orig_plot_ids %in% grey_out_ids, "grey70", orig_cols)
-labels_colors(dend_plot) <- cols
+# ───────────────────────── 5. EXPORT SEPARATE DENDROGRAMS ───────────────────
 
-# ──────────────────────────── 6. PLOT & EXPORT ─────────────────────────
-fig_w   <- 2500  # px
-fig_h   <- 1750  # px
+# Common device specs
+fig_w  <- 2000   # pixels   (≈ 170 mm at 300 dpi)
+fig_h  <- 1750   # pixels   (≈ 150 mm at 300 dpi)
 fig_res <- 300   # dpi
 
+# Keep a copy of the current par settings
+op <- par(no.readonly = TRUE)
+
+## ---------- 5a. VI-similarity tree (dend_vi) -------------------------------
+png("figures/final_figures/dendrogram_vi.png",
+    width = fig_w, height = fig_h, res = fig_res)
+
+par(mfrow = c(1, 1),                      # single panel
+    mar = c(4, 2, 2, right_lines(dend_vi)))  # dynamic right margin
+
+plot(dend_vi, horiz = TRUE,
+     main = "VIs Clustered by TRI Correlation Pattern",
+     xlab = "1 − Pearson r")
+abline(v = 0.20, lty = 2)
+
+dev.off()                                 # close first device
+
+## ---------- 5b. Plot-similarity tree (dend_plot) ---------------------------
 png("figures/final_figures/dendrogram_plot.png",
     width = fig_w, height = fig_h, res = fig_res)
 
@@ -614,11 +617,14 @@ par(mfrow = c(1, 1),
     mar = c(4, 2, 2, right_lines(dend_plot)))
 
 plot(dend_plot, horiz = TRUE,
-     main = "Plots Clustered by kNDVI ↔ TRI Correlation Pattern",
+     main = "Plots Clustered by EVI ↔ TRI Correlation Pattern",
      xlab = "1 − Pearson r")
 abline(v = 0.20, lty = 2)
 
-dev.off()
+dev.off()                                 # close second device
+
+# Restore original graphics settings
+par(op)
 
 
 

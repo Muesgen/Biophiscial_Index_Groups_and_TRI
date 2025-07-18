@@ -259,6 +259,8 @@ library(ggplot2)
 library(ggrepel)
 library(readxl)
 library(RColorBrewer)
+library(lubridate)
+library(scales)
 
 ## -------------------------------------------------------------
 ## 0. Settings
@@ -360,7 +362,11 @@ p <- ggplot() +
   } +
   ## axes, facets, palette
   facet_wrap(~ plot_lab, ncol = 2) +
-  scale_x_date(date_breaks = "2 month", date_labels = "%b", expand = c(0,0)) +
+  scale_x_date(
+    date_breaks = "2 month",
+    labels      = date_format("%b", locale = "en"),   # English month abbrev.
+    expand      = c(0, 0)
+  ) +
   scale_y_continuous(
     breaks = y_grid, expand = c(0,0)
   ) +
@@ -400,6 +406,157 @@ ggsave(
   width    = 12, height = 5, dpi = 300, bg = "white"
 )
 
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(readxl)
+library(RColorBrewer)
+library(lubridate)
+library(scales)
+
+## -------------------------------------------------------------
+## 0. Settings
+sig_thr   <- 0.05   # p-value threshold
+## -------------------------------------------------------------
+## 1. DATA — two plots, one VI
+df <- heat_all %>% 
+  dplyr::filter(plot %in% c("SF04", "SF08"),
+                tolower(VI) == "gndvi",
+                !is.na(correlation)) %>% 
+  mutate(
+    sig          = p_value < sig_thr,
+    ext_doy      = if_else(lag == 1, doy, doy + 365),
+    month_date   = as.Date(ext_doy - 1, origin = "2000-01-01"),
+    window_month = window * 8 / 30.437,
+    plot_lab     = sprintf("%s – %s – %s", plot, species, area)
+  )
+
+df_nsig <- df  %>% dplyr::filter(!sig)          # non-significant rows
+df_sig  <- df  %>% dplyr::filter( sig)          # significant rows
+
+## strongest |r| among sig. values, one per panel
+best_pts <- df_sig %>% 
+  group_by(plot_lab) %>% 
+  slice_max(abs(correlation), n = 1, with_ties = FALSE) %>% 
+  ungroup()
+
+## -------------------------------------------------------------
+## 2. Colour scale (same bin setup as before)
+rng     <- range(df$correlation, na.rm = TRUE)
+breaks  <- seq(floor(rng[1]/0.1)*0.1, ceiling(rng[2]/0.1)*0.1, 0.1)
+nbins   <- length(breaks) - 1
+pal     <- colorRampPalette(rev(RColorBrewer::brewer.pal(11,"RdYlBu")))(nbins)
+
+mid_vals <- (head(breaks,-1) + tail(breaks,-1)) / 2
+lab_vals <- sprintf("%.2f", mid_vals)
+lab_vals[lab_vals == "-0.00"] <- "0.00"
+
+## grid for dotted guides
+x_grid <- seq(min(df$month_date), max(df$month_date), by = "2 month")
+y_grid <- seq(0, ceiling(max(df$window_month, na.rm = TRUE)), by = 2)
+
+## -------------------------------------------------------------
+## 3. PLOT — fade first, opaque second
+p <- ggplot() +
+  ## significant layer (opaque)
+  geom_contour_filled(
+    data   = df,
+    aes(month_date, window_month,
+        z    = correlation,
+        fill = after_stat(as.numeric(level))),
+    breaks = breaks,
+    colour = NA, linewidth = 0,
+    na.rm  = TRUE
+  ) +
+  ## non-significant layer (faded)
+  geom_contour_filled(
+    data   = df_nsig,
+    aes(month_date, window_month,
+        z    = correlation,
+        fill = after_stat(as.numeric(level))),
+    breaks = breaks,
+    fill = "white",
+    alpha  = 0.5,
+    colour = NA, linewidth = 0,
+    na.rm  = TRUE
+  ) +
+  
+  ## thin grey isolines for context
+  geom_contour(
+    data   = df,
+    aes(month_date, window_month, z = correlation),
+    colour = "grey70", size = 0.15,
+    breaks = breaks
+  ) +
+  ## highlight best significant |r|
+  { if (nrow(best_pts) > 0)
+    list(
+      geom_point(
+        data = best_pts,
+        aes(month_date, window_month),
+        size = 2, shape = 21, stroke = .8,
+        fill = "yellow", colour = "black"
+      ),
+      geom_label_repel(
+        data   = best_pts,
+        aes(month_date, window_month,
+            label = sprintf("r = %.2f", correlation)),
+        size = 3,
+        fill = scales::alpha("white", 0.3),
+        colour = "black",
+        label.size = 0,
+        label.r    = unit(0.1, "lines"),
+        box.padding = 0.3,
+        point.padding = 0.2,
+        segment.color = NA
+      )
+    )
+  } +
+  ## axes, facets, palette
+  facet_wrap(~ plot_lab, ncol = 2) +
+  scale_x_date(
+    date_breaks = "2 month",
+    labels      = date_format("%b", locale = "en"),   # English month abbrev.
+    expand      = c(0, 0)
+  ) +
+  scale_y_continuous(
+    breaks = y_grid, expand = c(0,0)
+  ) +
+  geom_vline(xintercept = x_grid, colour = "grey50",
+             linetype = "dotted", size = 0.3) +
+  geom_hline(yintercept = y_grid, colour = "grey50",
+             linetype = "dotted", size = 0.3) +
+  scale_fill_stepsn(
+    colours = pal,
+    limits  = c(1, nbins),
+    breaks  = seq_len(nbins),
+    labels  = lab_vals,
+    name    = expression("Pearson "~italic(r)),
+    guide   = guide_colourbar(
+      barheight = unit(5, "cm"),
+      barwidth  = unit(0.5, "cm"),
+      ticks.colour = "black"
+    )
+  ) +
+  labs(
+    title = "GNDVI–TRI rolling correlation — plots SF04 & SF08",
+    x     = "Month (prev year → current year)",
+    y     = "Window length (months)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title  = element_text(face = "bold", hjust = 0.5),
+    strip.text  = element_text(face = "bold")
+  )
+
+print(p)
+# ───────────────────────── 4. SAVE THE FIGURE ────────────────────────────────
+
+ggsave(
+  filename = "figures/final_figures/GNDVI_TRI_SF04_SF08_grid.png",
+  plot     = p,
+  width    = 12, height = 5, dpi = 300, bg = "white"
+)
 # ───────────────────────── 0. PACKAGES ───────────────────────────────────────
 library(dplyr)
 library(ggplot2)
@@ -488,7 +645,11 @@ p <- ggplot() +
     point.padding = 0.2
   ) +
   #(~ VI, ncol = 2) +                # one column, two rows
-  scale_x_date(date_breaks = "2 month", date_labels = "%b", expand = c(0,0)) +
+  scale_x_date(
+    date_breaks = "2 month",
+    labels      = date_format("%b", locale = "en"),   # English month abbrev.
+    expand      = c(0, 0)
+  ) +
   scale_y_continuous(breaks = y_grid, expand = c(0,0)) +
   geom_vline(xintercept = x_grid, colour = "grey50", linetype = "dotted") +
   geom_hline(yintercept = y_grid, colour = "grey50", linetype = "dotted") +
@@ -518,7 +679,128 @@ ggsave(
   plot     = p,
   width    = 6, height = 4, dpi = 300, bg = "white"
 )
+#######################################
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(readxl)
+library(RColorBrewer)
 
+sig_thr <- 0.05                       # p-value threshold
+vi_set  <- c("kNDVI", "GVMI")         # two indices
+plot_id <- "SF18"                     # one plot
+
+# ───────────────────────── 1. DATA — one plot, two VIs ──────────────────────
+df <- heat_all %>% 
+  filter(plot == plot_id,
+         VI %in% vi_set,
+         !is.na(correlation)) %>% 
+  mutate(
+    sig          = p_value < sig_thr,
+    ext_doy      = if_else(lag == 1, doy, doy + 365),
+    month_date   = as.Date(ext_doy - 1, origin = "2000-01-01"),
+    window_month = window * 8 / 30.437,
+    VI           = factor(VI, levels = vi_set), 
+    panel_lab    = paste(VI),
+  )
+
+df_nsig <- filter(df, !sig)
+df_sig  <- filter(df,  sig)
+
+best_pts <- df_sig %>%                      # one “best” per panel
+  group_by(panel_lab) %>% 
+  slice_max(abs(correlation), n = 1, with_ties = FALSE) %>% 
+  ungroup()
+
+# ───────────────────────── 2. COLOUR SCALE (same bins) ──────────────────────
+rng    <- range(df$correlation, na.rm = TRUE)
+breaks <- seq(floor(rng[1]/0.1)*0.1, ceiling(rng[2]/0.1)*0.1, 0.1)
+nbins  <- length(breaks) - 1
+pal    <- colorRampPalette(rev(brewer.pal(11, "RdYlBu")))(nbins)
+
+lab_vals <- sprintf("%.2f",
+                    (head(breaks, -1) + tail(breaks, -1)) / 2)
+lab_vals[lab_vals == "-0.00"] <- "0.00"
+
+x_grid <- seq(min(df$month_date), max(df$month_date), by = "2 month")
+y_grid <- seq(0, ceiling(max(df$window_month)), by = 2)
+
+# ───────────────────────── 3. PLOT ───────────────────────────────────────────
+p <- ggplot() +
+  geom_contour_filled(
+    data   = df,
+    aes(month_date, window_month,
+        z    = correlation,
+        fill = after_stat(as.numeric(level))),
+    breaks = breaks, colour = NA
+  ) +
+  geom_contour_filled(
+    data   = df_nsig,
+    aes(month_date, window_month,
+        z    = correlation,
+        fill = after_stat(as.numeric(level))),
+    breaks = breaks, fill = "white", alpha = 0.5, colour = NA
+  ) +
+  geom_contour(
+    data   = df,
+    aes(month_date, window_month, z = correlation),
+    colour = "grey70", size = 0.15,
+    breaks = breaks
+  ) +
+  geom_point(
+    data = best_pts,
+    aes(month_date, window_month),
+    size = 2, shape = 21, stroke = .8,
+    fill = "yellow", colour = "black"
+  ) +
+  geom_label_repel(
+    data = best_pts,
+    aes(month_date, window_month,
+        label = sprintf("r = %.2f", correlation)),
+    size = 3,
+    fill = scales::alpha("white", 0.3),
+    colour = "black",
+    label.size = 0,
+    label.r    = unit(0.1, "lines"),
+    segment.color = NA,
+    box.padding   = 0.3,
+    point.padding = 0.2
+  ) +
+  facet_grid(~ VI) +                # one column, two rows
+  scale_x_date(
+    date_breaks = "2 month",
+    labels      = date_format("%b", locale = "en"),   # English month abbrev.
+    expand      = c(0, 0)
+  ) +
+  scale_y_continuous(breaks = y_grid, expand = c(0,0)) +
+  geom_vline(xintercept = x_grid, colour = "grey50", linetype = "dotted") +
+  geom_hline(yintercept = y_grid, colour = "grey50", linetype = "dotted") +
+  scale_fill_stepsn(
+    colours = pal,
+    limits  = c(1, nbins),
+    breaks  = seq_len(nbins),
+    labels  = lab_vals,
+    name    = expression("Pearson "~italic(r)),
+    guide   = guide_colourbar(barheight = unit(5,"cm"),
+                              barwidth  = unit(0.5,"cm"),
+                              ticks.colour = "black")
+  ) +
+  labs(
+    title = "kNDVI & GVMI Rolling Correlation with TRI — Plot SF18 (FASY-Kellerwald)",
+    x     = "Month (prev year → current year)",
+    y     = "Window length (months)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        strip.text  = element_text(face = "bold"))
+
+print(p)
+
+ggsave(
+  filename = "figures/final_figures/SF18_kNDVI_GVMI_grid.png",
+  plot     = p,
+  width    = 12, height = 5, dpi = 300, bg = "white"
+)
 # ───────────────────────── 0. PACKAGES ───────────────────────────────────────
 # install.packages(c("dplyr", "tidyr", "dendextend", "pals"))   # first time only
 library(dplyr)
@@ -747,6 +1029,7 @@ library(tidyr)
 library(ggplot2)
 library(RColorBrewer)
 library(readxl)
+library(scales)
 
 # ───────────────────── 1.  SETTINGS & DATA ────────────────────
 vi_target <- "kNDVI"                                   # change if desired
@@ -789,7 +1072,11 @@ p1 <- ggplot(df_med,
            fill = after_stat(as.numeric(level)))) +
   geom_contour_filled(breaks = breaks, colour = NA) +
   geom_contour(breaks = breaks, colour = "grey70", size = 0.15) +
-  scale_x_date(date_breaks = "2 month", date_labels = "%b", expand = c(0,0)) +
+  scale_x_date(
+    date_breaks = "2 month",
+    labels      = date_format("%b", locale = "en"),   # English month abbrev.
+    expand      = c(0, 0)
+  ) +
   scale_y_continuous(breaks = y_grid, expand = c(0,0)) +
   geom_vline(xintercept = x_grid, colour = "grey50", linetype = "dotted") +
   geom_hline(yintercept = y_grid, colour = "grey50", linetype = "dotted") +
@@ -808,7 +1095,7 @@ p1 <- ggplot(df_med,
        y = "Window length (months)") +
   theme_minimal(base_size = 11) +
   theme(plot.title = element_text(face = "bold", hjust = 0.5))
-
+p1
 
 ggsave(
   filename = "figures/final_figures/kNDVI_FASY_Cluster.png",

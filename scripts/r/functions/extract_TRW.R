@@ -1,8 +1,5 @@
 ################################################################################
 # Function: extract_dendro_data
-# Author: [Your Name]
-# Date:   [Date]
-#
 # Description:
 #   This function reads all .xlsx files from a specified folder, matches them 
 #   to a vector of measured tree points, and extracts the tree ring width data 
@@ -140,3 +137,4 @@ extract_TRW <- function(xls_folder, points_path, crop = FALSE) {
  chronologies_by_plot <- na.omit(chronologies_by_plot)
  
 write.csv(chronologies_by_plot, "data/analysis_ready_data/TRI_chronologies.csv", row.names = FALSE)
+

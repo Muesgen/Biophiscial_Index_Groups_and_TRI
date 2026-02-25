@@ -1,7 +1,5 @@
 ################################################################################
 # Script: SDC (Plot-Level) & Tree-Ring Chronology Correlation (Daily Version)
-# Author: <Your Name>
-# Date: YYYY-MM-DD
 #
 # This script:
 # 1) Extracts Landsat data for each plot using a 10m buffer, computes daily
@@ -258,4 +256,5 @@ ggplot(heatmap_df, aes(x = doy, y = window, fill = correlation)) +
   ) +
   theme_minimal() +
   theme(strip.text = element_text(face = "bold"))
+
 

@@ -2,7 +2,7 @@
 
 This repository contains scripts and analysis-ready data used to reproduce the workflow and figures for "8-Day Multisensor Derived Biophysical Index Groups and Their Ability to Explain Tree Ring Growth".
 
-##Author
+## Author
 
 Konstantin Engelmayer and Marvin Müsgen-von den Driesch
 
@@ -15,3 +15,10 @@ Konstantin Engelmayer and Marvin Müsgen-von den Driesch
 
 - Contains python scripts to compute SDC Data
 - Contains r scripts to compute vegetation index data and results presented in "8-Day Multisensor Derived Biophysical Index Groups and Their Ability to Explain Tree Ring Growth"
+
+## Contat
+
+Feel free to contact LCRS @ University of Marburg or authors
+
+https://vhrz669.hrz.uni-marburg.de/lcrs/
+muesgenv@staff.uni-marburg.de

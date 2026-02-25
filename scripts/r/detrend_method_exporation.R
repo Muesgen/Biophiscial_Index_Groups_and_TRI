@@ -1,7 +1,5 @@
 ################################################################################
 # Script: Detrending and Vegetation Index Comparison
-# Author: <Your Name>
-# Date: YYYY-MM-DD
 #
 # This script processes tree ring width (TRW) data:
 # 1. Loads required libraries and functions.
@@ -302,3 +300,4 @@ for (tree in tree_ids) {
   # Optional: Save to file, e.g., PNG
   # ggsave(paste0("Tree_", tree, "_Comparison.png"), plot = p, width = 8, height = 5)
 }
+

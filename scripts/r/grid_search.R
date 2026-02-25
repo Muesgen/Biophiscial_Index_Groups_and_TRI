@@ -2,8 +2,6 @@
 # Fast Grid‑Search of 2‑ and 3‑Band Vegetation Indices versus Tree‑Ring Chronology
 # (data.table + frollsum + furrr parallel version)
 # -----------------------------------------------------------------------------
-# Author   : <your name>
-# Created  : 2025‑05‑07
 # Purpose  :
 #   • explore a large design‑space of simple, data‑driven vegetation indices
 #   • score each candidate by the mean of the 10 strongest |Pearson r|
@@ -243,3 +241,4 @@ print(head(all_results, 20))
 
 # -----------------------------------------------------------------------------
 # END -------------------------------------------------------------------------
+

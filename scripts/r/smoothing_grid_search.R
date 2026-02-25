@@ -4,12 +4,6 @@
 #           rolling, loess) **after** extracting Landsat reflectance (SDC)
 #           exactly once.  This avoids calling the I/O‑heavy
 #           `extract_SDC_buffered()` repeatedly and makes the search far faster.
-# -----------------------------------------------------------------------------
-#  Author:  <your-name>
-#  Date:    2025-05-22
-# -----------------------------------------------------------------------------
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 0. PACKAGES & HELPERS  (multi‑core set‑up) ----------------------------------
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -226,4 +220,5 @@ best_per_vi <- results_df |>
   select(VI, method, sg_n, sg_p, rolling_n, loess_span,
          mean_abs_r, plots_used, mean_window, mean_doy) |>
   arrange(desc(mean_abs_r))
+
          

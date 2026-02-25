@@ -1,7 +1,5 @@
 ################################################################################
 # Function: extract_point_values
-# Author: [Your Name]
-# Date:   [Date]
 #
 # Description:
 #   This function reads all .tif files from a specified folder, extracts values 
@@ -125,4 +123,5 @@ extract_SDC <- function(folder_paths, points_path) {
   
   return(out)
 }
+
 
